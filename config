@@ -1,0 +1,85 @@
+# Ramo uses a single config file with a simple `key = value` syntax. The file is
+# looked up in the following order (first match wins):
+#
+# $XDG_CONFIG_HOME/ramo/config
+# $XDG_CONFIG_HOME/ramo/config.ramo
+# $HOME/.config/ramo/config
+# $HOME/.config/ramo/config.ramo
+#
+# If `XDG_CONFIG_HOME` is unset or empty, it defaults to `$HOME/.config`. If no config file is found, ramo starts with built-in defaults and prints a warning.
+#
+# The syntax is "key = value". The whitespace around the
+# equals doesn't matter.
+# `path = ~/Projects/*`
+#
+# Comments start with a `#` and are only valid on their own line.
+# Blank lines are ignored!
+#
+# Empty values reset the configuration to the default value
+# `path-worktrees =`
+#
+# Every config key can also be overridden from the command line. Boolean keys can
+# be passed as bare flags (meaning `true`); all others use `--key=value`:
+#
+# `ramo --auto-close`
+# `ramo --path="~/Projects/*" --daemon-timeout=120`
+#
+# You can obviously delete all these comments when you feel confortable with the config,
+# but I'd leave them for reference later on.
+#
+# ██████╗ ███████╗███████╗ █████╗ ██╗   ██╗██╗  ████████╗
+# ██╔══██╗██╔════╝██╔════╝██╔══██╗██║   ██║██║  ╚══██╔══╝
+# ██║  ██║█████╗  █████╗  ███████║██║   ██║██║     ██║
+# ██║  ██║██╔══╝  ██╔══╝  ██╔══██║██║   ██║██║     ██║
+# ██████╔╝███████╗██║     ██║  ██║╚██████╔╝███████╗██║
+# ╚═════╝ ╚══════╝╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝
+#
+#  ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
+# ██╔════╝██╔═══██╗████╗  ██║██╔════╝██║██╔════╝ ██╗
+# ██║     ██║   ██║██╔██╗ ██║█████╗  ██║██║  ███╗╚═╝
+# ██║     ██║   ██║██║╚██╗██║██╔══╝  ██║██║   ██║██╗
+# ╚██████╗╚██████╔╝██║ ╚████║██║     ██║╚██████╔╝╚═╝
+#  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝
+#
+# you can define a custom path for the directories
+# you want to create sessions from, including
+# where you want to host your worktrees
+path = ~/Projects/*
+path-worktrees = ~/Projects/worktrees
+
+# be careful with defining custom bindings due to
+# modifier shenanigans, feel free to open an issue
+# if something doesn't seem right
+bind-jumpto = enter
+bind-command-mode = :
+# uses `kill-session` in tmux, so it doesn't delete
+# your worktree or agent session
+bind-command-session-kill = k
+bind-command-worktree-new = n
+bind-command-worktree-delete = d
+
+# defines if the picker should close after jumping to a session
+auto-close = true
+
+hide-changes-inactive = false
+hide-changes-active = false
+hide-changes-worktree = false
+hide-hints-footer = false
+hide-hints-branches-active = false
+hide-hints-branches-inactive = false
+hide-hints-remotes-active = false
+hide-hints-remotes-inactive = false
+
+style-icon-daemon-loading = ─╲│╱
+style-icon-daemon-ready = ✓
+style-icon-active = *
+style-icon-worktree = ⑂
+style-icon-agent-idle = ✓
+style-icon-agent-running = ⠋⠙⠹⠸⢰⣰⣠⣄⣆⡆⠇⠏
+style-icon-input = ▸
+
+# the daemon self-destructs after 5 minutes
+# so it doesn't consume any resources
+# whatsoever when you're AFK
+# value in seconds
+daemon-timeout = 300

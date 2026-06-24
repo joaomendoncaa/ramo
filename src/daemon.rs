@@ -1,0 +1,536 @@
+use crate::builder::TreeBuilder;
+use crate::config::Config;
+use crate::logs;
+use crate::model::{FeedbackEntry, FeedbackType, Payload};
+
+pub struct Daemon {
+    config: Config,
+}
+
+impl Daemon {
+    pub fn new(config: &Config) -> Self {
+        Daemon {
+            config: config.clone(),
+        }
+    }
+
+    pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
+        start(overrides)
+    }
+
+    pub fn kill() {
+        let pid_path = pid_path();
+        let sock_path = sock_path();
+
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = pid_str.trim().parse::<i32>()
+        {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+        let _ = std::fs::remove_file(&sock_path);
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    pub fn preflight(&self, feedbacks: Vec<FeedbackEntry>) -> Payload {
+        Payload {
+            entries: Vec::new(),
+            config: self.config.clone(),
+            feedbacks,
+            entries_found: 0,
+        }
+    }
+}
+
+use log::{error, info, warn};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::thread::{self};
+use std::time::{Duration, Instant};
+
+const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(400);
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
+const ATTACH_POLL: Duration = Duration::from_millis(250);
+const SPAWN_POLL_ATTEMPTS: usize = 120;
+const TAIL_HISTORY: usize = 30;
+
+pub fn print_daemon_info() {
+    let pid_path = self::pid_path();
+    let sock_path = self::sock_path();
+    let running = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .map(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+        .unwrap_or(false);
+    let pid = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    print!("ramo daemon");
+    if let Some(pid) = pid {
+        print!(" pid={pid}");
+    }
+    println!(" running={running}");
+    println!("  sock  {}", sock_path.display());
+    println!("  pid   {}", pid_path.display());
+}
+
+pub fn sock_path() -> PathBuf {
+    logs::state_dir().join("daemon.sock")
+}
+
+pub fn pid_path() -> PathBuf {
+    logs::state_dir().join("daemon.pid")
+}
+
+pub fn is_daemon_running() -> bool {
+    if let Ok(pid_str) = std::fs::read_to_string(pid_path())
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+    } else {
+        false
+    }
+}
+
+fn show_last_n_lines(path: &Path, n: usize) {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(n);
+        for line in &lines[start..] {
+            println!("{line}");
+        }
+    }
+}
+
+pub fn attach() -> ! {
+    let pid = std::fs::read_to_string(pid_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "?".to_string());
+
+    let log_path = logs::state_dir().join("daemon.log");
+    eprintln!("daemon already running, attaching to {pid}");
+    eprintln!("{}~HEAD-{TAIL_HISTORY}", log_path.display());
+
+    show_last_n_lines(&log_path, TAIL_HISTORY);
+
+    let mut file = loop {
+        if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&log_path) {
+            break f;
+        }
+        thread::sleep(ATTACH_POLL);
+    };
+
+    let _ = file.seek(SeekFrom::End(0));
+
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let mut buf = [0u8; 4096];
+
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => {
+                if !is_daemon_running() {
+                    eprintln!("daemon exited");
+                    std::process::exit(0);
+                }
+                thread::sleep(ATTACH_POLL);
+            }
+            Ok(n) => {
+                handle.write_all(&buf[..n]).ok();
+                handle.flush().ok();
+            }
+            Err(_) => break,
+        }
+    }
+
+    std::process::exit(0);
+}
+
+pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
+    if is_daemon_running() {
+        attach();
+    }
+
+    logs::init("daemon").ok();
+    let dir = logs::state_dir();
+    std::fs::create_dir_all(&dir).ok();
+
+    let pid_path = pid_path();
+    std::fs::write(&pid_path, std::process::id().to_string()).ok();
+
+    let sock_path = sock_path();
+    let _ = std::fs::remove_file(&sock_path);
+
+    let (config, feedbacks) = Config::load(&overrides);
+    let config_file = Config::config_path();
+    let config_lock = Arc::new(RwLock::new(config));
+    let feedback_lock = Arc::new(RwLock::new(feedbacks));
+    let builder = Arc::new(TreeBuilder::new());
+    let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::new(Mutex::new(Vec::new()));
+
+    info!(
+        "daemon starting (timeout={}s)",
+        config_lock.read().unwrap().daemon_timeout
+    );
+
+    let data: Arc<RwLock<Vec<u8>>> = {
+        let (bytes, _) = build_payload(&config_lock, &feedback_lock, &builder);
+        Arc::new(RwLock::new(bytes))
+    };
+    info!("initial build done");
+
+    let listener = UnixListener::bind(&sock_path)?;
+    listener.set_nonblocking(true)?;
+
+    if let Some(ref path) = config_file {
+        let lock = config_lock.clone();
+        let data = data.clone();
+        let builder = builder.clone();
+        let ov = overrides.clone();
+        let path = path.clone();
+        let fb_lock = feedback_lock.clone();
+        let clients = clients.clone();
+        thread::spawn(move || {
+            let mut last_mtime = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            loop {
+                thread::sleep(CONFIG_POLL_INTERVAL);
+                let current_mtime = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+                if current_mtime != last_mtime {
+                    last_mtime = current_mtime;
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            let (mut c, mut fb) = Config::parse_content(&path, &content);
+                            fb.extend(c.apply_overrides(&ov));
+                            info!(
+                                "config reloaded\n{}",
+                                serde_json::to_string_pretty(&c).unwrap_or_default()
+                            );
+                            if let Ok(mut current) = lock.write() {
+                                *current = c;
+                            }
+                            if let Ok(mut f) = fb_lock.write() {
+                                *f = fb;
+                            }
+                            let (bytes, _) = build_payload(&lock, &fb_lock, &builder);
+                            if let Ok(mut d) = data.write() {
+                                *d = bytes;
+                            }
+                            let d = data.read().unwrap();
+                            let mut list = clients.lock().unwrap();
+                            let mut i = 0;
+                            while i < list.len() {
+                                if write_frame(&mut list[i], &d).is_ok() {
+                                    i += 1;
+                                } else {
+                                    list.swap_remove(i);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("failed to read config: {e}");
+                            if let Ok(mut f) = fb_lock.write() {
+                                f.push(FeedbackEntry {
+                                    level: FeedbackType::Error,
+                                    message: format!(
+                                        "cannot read config file '{}': {e}",
+                                        path.display()
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let data = data.clone();
+        let config_lock = config_lock.clone();
+        let feedback_lock = feedback_lock.clone();
+        let builder = builder.clone();
+        let clients = clients.clone();
+        thread::spawn(move || {
+            let mut has_entries = false;
+            loop {
+                let interval = if has_entries {
+                    REFRESH_INTERVAL
+                } else {
+                    Duration::from_millis(500)
+                };
+                thread::sleep(interval);
+                let (bytes, entry_count) =
+                    build_payload(&config_lock, &feedback_lock, &builder);
+                has_entries = entry_count > 0;
+                if let Ok(mut d) = data.write() {
+                    *d = bytes;
+                }
+                let d = data.read().unwrap();
+                let mut list = clients.lock().unwrap();
+                let mut i = 0;
+                while i < list.len() {
+                    if write_frame(&mut list[i], &d).is_ok() {
+                        i += 1;
+                    } else {
+                        list.swap_remove(i);
+                    }
+                }
+            }
+        });
+    }
+
+    let mut last_connection = std::time::Instant::now();
+
+    {
+        let log_path = logs::state_dir().join("daemon.log");
+        eprintln!(
+            "daemon ready (pid {}), logging to {}",
+            std::process::id(),
+            log_path.display()
+        );
+        show_last_n_lines(&log_path, TAIL_HISTORY);
+
+        thread::spawn(move || {
+            let mut file = loop {
+                if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&log_path) {
+                    break f;
+                }
+                thread::sleep(ACCEPT_POLL);
+            };
+            let _ = file.seek(SeekFrom::End(0));
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            let mut buf = [0u8; 4096];
+            loop {
+                match file.read(&mut buf) {
+                    Ok(0) => thread::sleep(ATTACH_POLL),
+                    Ok(n) => {
+                        handle.write_all(&buf[..n]).ok();
+                        handle.flush().ok();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                last_connection = std::time::Instant::now();
+                info!("serving client");
+                if let Ok(bytes) = data.read().map(|d| d.clone())
+                    && write_frame(&mut stream, &bytes).is_ok()
+                {
+                    clients.lock().unwrap().push(stream);
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let idle_timeout = config_lock
+                    .read()
+                    .map(|c| c.daemon_timeout_duration())
+                    .unwrap_or_else(|_| Duration::from_secs(600));
+                if last_connection.elapsed() > idle_timeout && clients.lock().unwrap().is_empty() {
+                    info!("idle timeout reached, shutting down daemon");
+                    break;
+                }
+                thread::sleep(ACCEPT_POLL);
+            }
+            Err(e) => {
+                error!("accept error: {}", e);
+                break;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&sock_path);
+    let _ = std::fs::remove_file(&pid_path);
+    Ok(())
+}
+
+fn build_payload(
+    config_lock: &Arc<RwLock<Config>>,
+    feedback_lock: &Arc<RwLock<Vec<FeedbackEntry>>>,
+    builder: &TreeBuilder,
+) -> (Vec<u8>, usize) {
+    let config = config_lock.read().unwrap();
+    let feedbacks = feedback_lock.read().unwrap();
+    let entries = builder.build(&config.path);
+    let entry_count = entries.len();
+    let bytes = serde_json::to_vec(&Payload {
+        entries,
+        config: config.clone(),
+        feedbacks: feedbacks.clone(),
+        entries_found: entry_count,
+    })
+    .unwrap_or_default();
+    (bytes, entry_count)
+}
+
+fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
+    let len: u32 = bytes
+        .len()
+        .try_into()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "payload too large"))?;
+    stream.write_all(&len.to_le_bytes())?;
+    stream.write_all(bytes)?;
+    stream.flush()?;
+    Ok(())
+}
+
+pub fn read_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+pub fn fetch_once() -> Option<Vec<u8>> {
+    let mut stream = UnixStream::connect(sock_path()).ok()?;
+    read_frame(&mut stream).ok()
+}
+
+pub fn listen(tx: mpsc::Sender<Option<Payload>>) {
+    thread::spawn(move || {
+        let mut backoff = Duration::from_millis(100);
+        loop {
+            match UnixStream::connect(sock_path()) {
+                Ok(mut stream) => {
+                    backoff = Duration::from_millis(100);
+                    while let Ok(bytes) = read_frame(&mut stream) {
+                        if let Ok(payload) = serde_json::from_slice(&bytes)
+                            && tx.send(Some(payload)).is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => {
+                    thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(10));
+                }
+            }
+        }
+    });
+}
+
+pub fn spawn(overrides: &[(String, Option<String>)]) -> Option<()> {
+    let exe = std::env::current_exe().ok()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("daemon").arg("start");
+    for (key, val) in overrides {
+        match val {
+            Some(v) => cmd.arg(format!("--{key}={v}")),
+            None => cmd.arg(format!("--{key}")),
+        };
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    Some(())
+}
+
+pub fn fetch_or_spawn<F>(overrides: &[(String, Option<String>)], mut on_poll: F) -> Option<Vec<u8>>
+where
+    F: FnMut(usize),
+{
+    if overrides.is_empty() {
+        if let Some(b) = fetch_once() {
+            info!("daemon cache hit");
+            return Some(b);
+        }
+    } else {
+        Daemon::kill();
+    }
+
+    let (config, _) = Config::load(overrides);
+    info!("daemon cold-start (timeout={}s)", config.daemon_timeout);
+    spawn(overrides)?;
+
+    let spawn_start = std::time::Instant::now();
+    for _ in 0..SPAWN_POLL_ATTEMPTS {
+        on_poll(0);
+        if let Some(b) = fetch_once() {
+            info!("daemon ready after {}ms", spawn_start.elapsed().as_millis());
+            return Some(b);
+        }
+    }
+
+    warn!("daemon never became reachable after spawn");
+    None
+}
+
+pub fn initial_fetch(overrides: &[(String, Option<String>)]) -> Payload {
+    let fetch_start = Instant::now();
+
+    let poll = || thread::sleep(Duration::from_millis(50));
+
+    let mut bytes = fetch_or_spawn(overrides, |_| poll());
+
+    if bytes.is_some() {
+        let window = Instant::now();
+        let max_wait = Duration::from_secs(2);
+        loop {
+            let timed_out = window.elapsed() > max_wait;
+            if let Some(payload) = bytes
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<Payload>(b).ok())
+            {
+                if !payload.entries.is_empty() || timed_out {
+                    info!("fetch: {}ms", fetch_start.elapsed().as_millis());
+                    return payload;
+                }
+            } else if timed_out {
+                break;
+            }
+            poll();
+            bytes = fetch_once();
+        }
+    }
+
+    info!("fetch: {}ms", fetch_start.elapsed().as_millis());
+    warn!("daemon unavailable, using empty state");
+    let (config, feedbacks) = Config::load(overrides);
+    Payload {
+        entries: Vec::new(),
+        config,
+        feedbacks,
+        entries_found: 0,
+    }
+}
+
+pub fn print_config() {
+    match Config::config_path() {
+        Some(path) => {
+            println!("config: {}", path.display());
+            match std::fs::read_to_string(&path) {
+                Ok(content) => print!("{content}"),
+                Err(e) => eprintln!("error reading config: {e}"),
+            }
+        }
+        None => eprintln!("ramo: no config file found"),
+    }
+}
+
+pub fn show_logs() {
+    if is_daemon_running() {
+        attach();
+    } else {
+        eprintln!("ramo: daemon is not running");
+    }
+}
