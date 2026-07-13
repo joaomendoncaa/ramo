@@ -1,5 +1,6 @@
 mod builder;
 mod cli;
+mod clickable;
 mod config;
 mod daemon;
 mod events;

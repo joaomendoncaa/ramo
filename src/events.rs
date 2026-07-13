@@ -1,4 +1,4 @@
-use crate::model::EntryType;
+use crate::clickable::ClickAction;
 use crate::picker::Picker;
 use crate::tmux;
 
@@ -59,11 +59,25 @@ impl Picker {
     }
 
     pub fn handle_mouse(&mut self, event: MouseEvent) {
+        self.last_mouse_col = event.column;
+        self.last_mouse_row = event.row;
+
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.check_clickables(event.column, event.row) {
+                    return;
+                }
                 if let Some(idx) = self.get_index_from_mouse(event.column, event.row) {
                     self.cursor = idx;
                     self.goto();
+                }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                if self.check_clickables(event.column, event.row) {
+                    return;
+                }
+                if self.get_index_from_mouse(event.column, event.row).is_some() {
+                    self.command_mode = true;
                 }
             }
             MouseEventKind::Moved => {
@@ -90,23 +104,43 @@ impl Picker {
                 self.command_mode = false;
             }
             KeyCode::Char('k') => {
-                if let Some(&idx) = self.filtered.get(self.cursor) {
-                    let entry = &self.entries[idx];
-                    if (entry.is_open || entry.kind == EntryType::Agent)
-                        && let Some(goto) = &entry.goto
-                    {
-                        if let Some(window) = &goto.window {
-                            tmux::kill_window(&goto.session, *window);
-                        } else {
-                            let sanitized = goto.session.replace([':', '.'], "_");
-                            tmux::kill_session(&sanitized);
-                        }
-                        self.command_mode = false;
-                        self.schedule_refresh();
-                    }
-                }
+                self.execute_kill_session();
+            }
+            KeyCode::Char('o') => {
+                self.open_detached();
             }
             _ => {}
+        }
+    }
+
+    fn check_clickables(&mut self, col: u16, row: u16) -> bool {
+        let action = self
+            .clickables
+            .iter()
+            .find(|c| c.contains(col, row))
+            .map(|c| c.action);
+        if let Some(action) = action {
+            self.handle_click(action);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn handle_click(&mut self, action: ClickAction) {
+        match action {
+            ClickAction::CommandMode => self.command_mode = true,
+            ClickAction::ExitCommandMode => self.command_mode = false,
+            ClickAction::KillSession => self.execute_kill_session(),
+            ClickAction::OpenDetached => self.open_detached(),
+            ClickAction::MoveUp => self.move_cursor(-1),
+            ClickAction::MoveDown => self.move_cursor(1),
+            ClickAction::ResetInput => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.filter();
+            }
+            ClickAction::Quit => self.quit = true,
         }
     }
 

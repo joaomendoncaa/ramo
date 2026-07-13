@@ -109,6 +109,14 @@ pub fn goto(action: &Goto) {
     }
 }
 
+pub fn open_detached(action: &Goto) {
+    let Goto { session, path, .. } = action;
+    let sanitized = session.replace([':', '.'], "_");
+    if !has_session(&sanitized) {
+        new_session(&sanitized, path);
+    }
+}
+
 pub fn select_pane(session: &str, window: usize, pane: usize) {
     let _ = Command::new("tmux")
         .args(["select-window", "-t", &format!("{}:{}", session, window)])

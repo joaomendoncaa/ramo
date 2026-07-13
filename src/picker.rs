@@ -1,7 +1,9 @@
+use crate::clickable::{ClickAction, Clickable};
 use crate::config::Config;
 use crate::daemon;
 use crate::logs;
-use crate::model::{Entry, FeedbackEntry, Goto, Payload};
+use crate::model::{Entry, EntryType, FeedbackEntry, Goto, Payload};
+use crate::tmux;
 use ratatui::layout::Rect;
 use std::sync::mpsc;
 use std::thread;
@@ -39,6 +41,9 @@ pub struct Picker {
     pub(crate) config: Config,
     pub(crate) feedbacks: Vec<FeedbackEntry>,
     pub(crate) entries_found: usize,
+    pub(crate) clickables: Vec<Clickable>,
+    pub(crate) last_mouse_col: u16,
+    pub(crate) last_mouse_row: u16,
 }
 
 impl Picker {
@@ -66,6 +71,9 @@ impl Picker {
             scroll: 0,
             mouse_hover: false,
             command_mode: false,
+            clickables: Vec::new(),
+            last_mouse_col: 0,
+            last_mouse_row: 0,
             reveal_open: true,
             auto_close,
             config: payload.config,
@@ -139,5 +147,57 @@ impl Picker {
             let payload = daemon::initial_fetch(&overrides);
             let _ = tx.send(Some(payload));
         });
+    }
+
+    pub fn cursor_entry_buttons(&self) -> Vec<(String, ClickAction)> {
+        if !self.command_mode {
+            return vec![];
+        }
+        let Some(&idx) = self.filtered.get(self.cursor) else {
+            return vec![];
+        };
+        let entry = &self.entries[idx];
+        let mut buttons = Vec::new();
+        if entry.is_open || entry.kind == EntryType::Agent {
+            let key = self.config.bind_command_session_kill.to_uppercase();
+            buttons.push((format!("{key} Kill Session"), ClickAction::KillSession));
+        } else if entry.goto.is_some() {
+            buttons.push(("O Open Detached".to_string(), ClickAction::OpenDetached));
+        }
+        buttons
+    }
+
+    pub fn execute_kill_session(&mut self) {
+        if let Some(&idx) = self.filtered.get(self.cursor) {
+            let entry = &self.entries[idx];
+            if (entry.is_open || entry.kind == EntryType::Agent)
+                && let Some(goto) = &entry.goto
+            {
+                if let Some(window) = &goto.window {
+                    tmux::kill_window(&goto.session, *window);
+                } else {
+                    let sanitized = goto.session.replace([':', '.'], "_");
+                    tmux::kill_session(&sanitized);
+                }
+                self.command_mode = false;
+                self.schedule_refresh();
+            }
+        }
+    }
+
+    pub fn open_detached(&mut self) {
+        if let Some(&idx) = self.filtered.get(self.cursor) {
+            let entry = &self.entries[idx];
+            if !entry.is_open && entry.kind != EntryType::Agent && let Some(goto) = &entry.goto {
+                tmux::open_detached(goto);
+                let mut cur = Some(idx);
+                while let Some(i) = cur {
+                    self.entries[i].is_open = true;
+                    cur = self.entries[i].parent;
+                }
+                self.command_mode = false;
+                self.schedule_refresh();
+            }
+        }
     }
 }
