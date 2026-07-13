@@ -5,21 +5,23 @@ pub const HOVER_BG: Color = Color::Rgb(0xff, 0x00, 0x00);
 pub const HOVER_FG: Color = Color::Rgb(0xff, 0xff, 0xff);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ClickAction {
+pub enum Action {
     CommandMode,
     ExitCommandMode,
     KillSession,
     OpenDetached,
+    MovePrevious,
+    MoveNext,
     MoveUp,
     MoveDown,
     ResetInput,
-    Quit,
+    Close,
 }
 
 #[derive(Debug, Clone)]
 pub struct Clickable {
     pub rect: Rect,
-    pub action: ClickAction,
+    pub action: Action,
 }
 
 impl Clickable {

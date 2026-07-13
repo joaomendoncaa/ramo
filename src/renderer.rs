@@ -1,4 +1,4 @@
-use crate::clickable::{ClickAction, Clickable, HOVER_BG, HOVER_FG};
+use crate::clickable::{Action, Clickable, HOVER_BG, HOVER_FG};
 use crate::model::{Entry, EntryType, FeedbackEntry, FeedbackType};
 use crate::picker::Picker;
 use ratatui::{
@@ -81,7 +81,8 @@ impl Renderer {
             if let Some(changes) = &entry.changes
                 && !changes.has_none()
             {
-                w += 1 + format!("+{}", changes.additions).len()
+                w += 1
+                    + format!("+{}", changes.additions).len()
                     + 1
                     + format!("-{}", changes.deletions).len();
             }
@@ -123,7 +124,8 @@ impl Renderer {
             let entry = &entries[filtered[i]];
             let mut line = Self::entry(entry, spinner, i == cursor, cmd);
             if cmd && i == cursor && !buttons.is_empty() {
-                line.spans.push(Span::styled("  ", Style::default().bg(Color::Reset)));
+                line.spans
+                    .push(Span::styled("  ", Style::default().bg(Color::Reset)));
                 for (bi, (text, _action)) in buttons.iter().enumerate() {
                     let is_hovered = picker.clickables.iter().any(|c| {
                         c.action == *_action
@@ -136,7 +138,8 @@ impl Renderer {
                     };
                     line.spans.push(Span::styled(text.as_str(), style));
                     if bi < buttons.len() - 1 {
-                        line.spans.push(Span::styled(" ", Style::default().bg(Color::Reset)));
+                        line.spans
+                            .push(Span::styled(" ", Style::default().bg(Color::Reset)));
                     }
                 }
             }
@@ -152,7 +155,10 @@ impl Renderer {
                 .iter()
                 .find(|c| c.contains(picker.last_mouse_col, picker.last_mouse_row))
                 .map(|c| c.action);
-            frame.render_widget(Paragraph::new(Self::hints_line(picker, hovered_action)), slots[idx]);
+            frame.render_widget(
+                Paragraph::new(Self::hints_line(picker, hovered_action)),
+                slots[idx],
+            );
             idx += 1;
         }
         for fb in &picker.feedbacks {
@@ -311,21 +317,23 @@ impl Renderer {
             let w = 3 + " Escape Command Mode".len();
             picker.clickables.push(Clickable {
                 rect: Rect::new(x, y, w as u16, 1),
-                action: ClickAction::ExitCommandMode,
+                action: Action::ExitCommandMode,
             });
         } else {
             let first_w = 1 + " Command Mode  ".len();
             picker.clickables.push(Clickable {
                 rect: Rect::new(x, y, first_w as u16, 1),
-                action: ClickAction::CommandMode,
+                action: Action::CommandMode,
             });
             x += first_w as u16;
 
-            let groups: [(u16, ClickAction); 4] = [
-                (6 + 11, ClickAction::MoveUp),
-                (6 + 7, ClickAction::MoveDown),
-                (6 + 14, ClickAction::ResetInput),
-                (6 + 6, ClickAction::Quit),
+            let groups: [(u16, Action); 6] = [
+                (6 + 11, Action::MovePrevious),
+                (6 + 7, Action::MoveNext),
+                (6 + 7, Action::MoveDown),
+                (6 + 7, Action::MoveUp),
+                (6 + 14, Action::ResetInput),
+                (6 + 6, Action::Close),
             ];
             for (w, action) in groups {
                 picker.clickables.push(Clickable {
@@ -337,14 +345,14 @@ impl Renderer {
         }
     }
 
-    fn hints_line(picker: &Picker, hovered_action: Option<ClickAction>) -> Line<'_> {
+    fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
         let hk = Style::default().bg(HOVER_BG).fg(HOVER_FG);
         let hd = Style::default().bg(HOVER_BG).fg(HOVER_FG);
         let sk = Style::default().add_modifier(Modifier::DIM);
         let sd = Style::default().add_modifier(Modifier::DIM);
 
         if picker.command_mode {
-            let exit_hovered = hovered_action == Some(ClickAction::ExitCommandMode);
+            let exit_hovered = hovered_action == Some(Action::ExitCommandMode);
             return Line::from(vec![
                 Span::styled(
                     format!("{}", picker.config.bind_command_mode),
@@ -359,27 +367,28 @@ impl Renderer {
             ]);
         }
 
-        let cmd_hovered = hovered_action == Some(ClickAction::CommandMode);
-        let up_hovered = hovered_action == Some(ClickAction::MoveUp);
-        let down_hovered = hovered_action == Some(ClickAction::MoveDown);
-        let reset_hovered = hovered_action == Some(ClickAction::ResetInput);
-        let quit_hovered = hovered_action == Some(ClickAction::Quit);
+        let hovered_cmd = hovered_action == Some(Action::CommandMode);
+        let hovered_previous = hovered_action == Some(Action::MovePrevious);
+        let hovered_next = hovered_action == Some(Action::MoveNext);
+        let hovered_reset_cursor = hovered_action == Some(Action::ResetInput);
+        let hovered_close = hovered_action == Some(Action::Close);
 
         Line::from(vec![
-            Span::styled(format!("{}", picker.config.bind_command_mode), if cmd_hovered { hk } else { sk }),
-            Span::styled(" Command Mode  ", if cmd_hovered { hd } else { sd }),
-            Span::styled("CTRL P", if up_hovered { hk } else { sk }),
-            Span::styled(" Previous  ", if up_hovered { hd } else { sd }),
-            Span::styled("CTRL N", if down_hovered { hk } else { sk }),
-            Span::styled(" Next  ", if down_hovered { hd } else { sd }),
-            Span::styled("CTRL R", if reset_hovered { hk } else { sk }),
-            Span::styled(" Reset Cursor ", if reset_hovered { hd } else { sd }),
-            Span::styled("CTRL C", if quit_hovered { hk } else { sk }),
-            Span::styled(" Close", if quit_hovered { hd } else { sd }),
+            Span::styled(
+                format!("{}", picker.config.bind_command_mode),
+                if hovered_cmd { hk } else { sk },
+            ),
+            Span::styled(" Command Mode  ", if hovered_cmd { hd } else { sd }),
+            Span::styled("CTRL P", if hovered_previous { hk } else { sk }),
+            Span::styled(" Previous  ", if hovered_previous { hd } else { sd }),
+            Span::styled("CTRL N", if hovered_next { hk } else { sk }),
+            Span::styled(" Next  ", if hovered_next { hd } else { sd }),
+            Span::styled("CTRL R", if hovered_reset_cursor { hk } else { sk }),
+            Span::styled(" Reset Cursor ", if hovered_reset_cursor { hd } else { sd }),
+            Span::styled("CTRL C", if hovered_close { hk } else { sk }),
+            Span::styled(" Close", if hovered_close { hd } else { sd }),
         ])
     }
-
-
 
     pub fn feedback(feedback: &FeedbackEntry) -> Line<'_> {
         let fg = match feedback.level {

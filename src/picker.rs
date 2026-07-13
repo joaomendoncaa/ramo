@@ -1,4 +1,4 @@
-use crate::clickable::{ClickAction, Clickable};
+use crate::clickable::{Action, Clickable};
 use crate::config::Config;
 use crate::daemon;
 use crate::logs;
@@ -149,7 +149,7 @@ impl Picker {
         });
     }
 
-    pub fn cursor_entry_buttons(&self) -> Vec<(String, ClickAction)> {
+    pub fn cursor_entry_buttons(&self) -> Vec<(String, Action)> {
         if !self.command_mode {
             return vec![];
         }
@@ -160,9 +160,9 @@ impl Picker {
         let mut buttons = Vec::new();
         if entry.is_open || entry.kind == EntryType::Agent {
             let key = self.config.bind_command_session_kill.to_uppercase();
-            buttons.push((format!("{key} Kill Session"), ClickAction::KillSession));
+            buttons.push((format!("{key} Kill Session"), Action::KillSession));
         } else if entry.goto.is_some() {
-            buttons.push(("O Open Detached".to_string(), ClickAction::OpenDetached));
+            buttons.push(("O Open Detached".to_string(), Action::OpenDetached));
         }
         buttons
     }
@@ -188,7 +188,10 @@ impl Picker {
     pub fn open_detached(&mut self) {
         if let Some(&idx) = self.filtered.get(self.cursor) {
             let entry = &self.entries[idx];
-            if !entry.is_open && entry.kind != EntryType::Agent && let Some(goto) = &entry.goto {
+            if !entry.is_open
+                && entry.kind != EntryType::Agent
+                && let Some(goto) = &entry.goto
+            {
                 tmux::open_detached(goto);
                 let mut cur = Some(idx);
                 while let Some(i) = cur {

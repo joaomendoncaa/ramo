@@ -1,4 +1,4 @@
-use crate::clickable::ClickAction;
+use crate::clickable::Action;
 use crate::picker::Picker;
 use crate::tmux;
 
@@ -15,6 +15,14 @@ impl Picker {
                     }
                     KeyCode::Char('n') => {
                         self.move_cursor(1);
+                        return;
+                    }
+                    KeyCode::Char('u') => {
+                        self.move_cursor(-5);
+                        return;
+                    }
+                    KeyCode::Char('d') => {
+                        self.move_cursor(5);
                         return;
                     }
                     KeyCode::Char('r') => {
@@ -127,20 +135,22 @@ impl Picker {
         }
     }
 
-    fn handle_click(&mut self, action: ClickAction) {
+    fn handle_click(&mut self, action: Action) {
         match action {
-            ClickAction::CommandMode => self.command_mode = true,
-            ClickAction::ExitCommandMode => self.command_mode = false,
-            ClickAction::KillSession => self.execute_kill_session(),
-            ClickAction::OpenDetached => self.open_detached(),
-            ClickAction::MoveUp => self.move_cursor(-1),
-            ClickAction::MoveDown => self.move_cursor(1),
-            ClickAction::ResetInput => {
+            Action::CommandMode => self.command_mode = true,
+            Action::ExitCommandMode => self.command_mode = false,
+            Action::KillSession => self.execute_kill_session(),
+            Action::OpenDetached => self.open_detached(),
+            Action::MovePrevious => self.move_cursor(-1),
+            Action::MoveNext => self.move_cursor(1),
+            Action::MoveUp => self.move_cursor(5),
+            Action::MoveDown => self.move_cursor(-5),
+            Action::ResetInput => {
                 self.input.clear();
                 self.input_cursor = 0;
                 self.filter();
             }
-            ClickAction::Quit => self.quit = true,
+            Action::Close => self.quit = true,
         }
     }
 
@@ -166,14 +176,16 @@ impl Picker {
         match key.code {
             KeyCode::Char('p') => self.move_cursor(-1),
             KeyCode::Char('n') => self.move_cursor(1),
+            KeyCode::Char('u') => {
+                self.move_cursor(-5);
+            }
+            KeyCode::Char('d') => {
+                self.move_cursor(5);
+            }
             KeyCode::Char('c') | KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('a') => self.input_cursor = 0,
             KeyCode::Char('e') => self.input_cursor = self.input.len(),
-            KeyCode::Char('u') => {
-                self.input.drain(0..self.input_cursor);
-                self.input_cursor = 0;
-                self.filter();
-            }
+
             KeyCode::Char('k') => {
                 self.input.drain(self.input_cursor..);
                 self.filter();
@@ -243,17 +255,20 @@ impl Picker {
         }
     }
 
-    fn move_cursor(&mut self, dir: i32) {
+    fn move_cursor(&mut self, amount: i32) {
         self.mouse_hover = false;
+
         let len = self.filtered.len();
-        if len == 0 {
+        if len == 0 || amount == 0 {
             return;
         }
-        if dir < 0 {
-            self.cursor = self.cursor.checked_sub(1).unwrap_or(len - 1);
+
+        if amount < 0 {
+            let step = amount.unsigned_abs() as usize;
+            self.cursor = self.cursor.checked_sub(step).unwrap_or(len - 1);
         }
-        if dir > 0 {
-            self.cursor = (self.cursor + 1) % len;
+        if amount > 0 {
+            self.cursor = (self.cursor + amount as usize) % len;
         }
     }
 
