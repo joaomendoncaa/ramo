@@ -42,6 +42,7 @@ fn query_sessions(conn: &Connection) -> Vec<Opencode> {
                  WHERE p.session_id = s.id
                  ORDER BY p.time_created DESC, p.id DESC LIMIT 1)
          FROM session s WHERE s.time_archived IS NULL
+         AND (s.agent IS NULL OR s.agent != 'Git Commit')
          ORDER BY s.time_updated DESC",
     ) {
         Ok(s) => s,

@@ -25,7 +25,10 @@ impl Daemon {
         if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
             && let Ok(pid) = pid_str.trim().parse::<i32>()
         {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let _ = Command::new("kill")
+                .arg(pid.to_string())
+                .stderr(Stdio::null())
+                .status();
         }
         let _ = std::fs::remove_file(&sock_path);
         let _ = std::fs::remove_file(&pid_path);
