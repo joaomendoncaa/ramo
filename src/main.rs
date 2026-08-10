@@ -7,10 +7,13 @@ mod events;
 mod filter;
 mod git;
 mod logs;
+mod metrics;
 mod model;
 mod opencode;
 mod picker;
 mod renderer;
+mod selfdestruct;
+mod service;
 mod terminal;
 mod tmux;
 mod util;
@@ -44,6 +47,19 @@ fn main() -> io::Result<()> {
         Command::Daemon(Daemon::Logs) => {
             daemon::show_logs();
             return Ok(());
+        }
+        Command::Daemon(Daemon::Stats) => {
+            metrics::print_stats();
+            return Ok(());
+        }
+        Command::Daemon(Daemon::Install) => {
+            return service::install();
+        }
+        Command::Daemon(Daemon::Uninstall) => {
+            return service::uninstall();
+        }
+        Command::SelfDestruct => {
+            return selfdestruct::run();
         }
         Command::Config => {
             daemon::print_config();

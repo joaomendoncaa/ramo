@@ -48,7 +48,7 @@ pub struct Opencode {
     pub is_running: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub path: PathBuf,
     pub is_main: bool,

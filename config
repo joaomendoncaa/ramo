@@ -78,8 +78,9 @@ style-icon-agent-idle = ✓
 style-icon-agent-running = ⠋⠙⠹⠸⢰⣰⣠⣄⣆⡆⠇⠏
 style-icon-input = ▸
 
-# the daemon self-destructs after 5 minutes
-# so it doesn't consume any resources
-# whatsoever when you're AFK
+# the daemon is thin when idle: with no picker connected it only does a
+# light keep-warm refresh every 30s (~0% CPU), so it can happily run at
+# login forever. it still self-destructs after this many idle seconds
+# when not running under systemd
 # value in seconds
 daemon-timeout = 300

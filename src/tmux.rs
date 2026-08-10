@@ -4,26 +4,44 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-pub fn list_sessions() -> Vec<TmuxSession> {
-    tmux_output(
-        &["list-sessions", "-F", "#{session_name}\t#{session_path}"],
-        parse_session,
-    )
+pub struct Snapshot {
+    pub sessions: Vec<TmuxSession>,
+    pub panes: Vec<TmuxPane>,
 }
 
-pub fn list_panes() -> Vec<TmuxPane> {
-    tmux_output(
-        &[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_current_path}\t#{session_activity}",
-        ],
-        parse_pane,
-    )
+// Sessions and panes come from a single tmux call: every session has at least
+// one pane, so `list-panes -a` is a superset of `list-sessions`.
+pub fn snapshot() -> Snapshot {
+    let mut sessions: Vec<TmuxSession> = Vec::new();
+    let mut panes: Vec<TmuxPane> = Vec::new();
+    for line in tmux_lines(&[
+        "list-panes",
+        "-a",
+        "-F",
+        "#{session_name}\t#{session_path}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_current_path}\t#{session_activity}",
+    ]) {
+        let p: Vec<&str> = line.split('\t').collect();
+        if p.len() == 7 {
+            panes.push(TmuxPane {
+                session_name: p[0].into(),
+                window_index: p[2].parse().unwrap_or(0),
+                pane_index: p[3].parse().unwrap_or(0),
+                current_command: p[4].into(),
+                current_path: PathBuf::from(p[5]),
+                activity: p[6].parse().unwrap_or(0),
+            });
+            if !sessions.iter().any(|s| s.name == p[0]) {
+                sessions.push(TmuxSession {
+                    name: p[0].into(),
+                    path: PathBuf::from(p[1]),
+                });
+            }
+        }
+    }
+    Snapshot { sessions, panes }
 }
 
-fn tmux_output<T>(args: &[&str], parse: impl Fn(&str) -> Option<T>) -> Vec<T> {
+fn tmux_lines(args: &[&str]) -> Vec<String> {
     Command::new("tmux")
         .args(args)
         .output()
@@ -33,30 +51,10 @@ fn tmux_output<T>(args: &[&str], parse: impl Fn(&str) -> Option<T>) -> Vec<T> {
             }
             String::from_utf8_lossy(&o.stdout)
                 .lines()
-                .filter_map(parse)
+                .map(ToString::to_string)
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn parse_session(line: &str) -> Option<TmuxSession> {
-    let p: Vec<&str> = line.split('\t').collect();
-    (p.len() == 2).then(|| TmuxSession {
-        name: p[0].into(),
-        path: PathBuf::from(p[1]),
-    })
-}
-
-fn parse_pane(line: &str) -> Option<TmuxPane> {
-    let p: Vec<&str> = line.split('\t').collect();
-    (p.len() == 6).then(|| TmuxPane {
-        session_name: p[0].into(),
-        window_index: p[1].parse().unwrap_or(0),
-        pane_index: p[2].parse().unwrap_or(0),
-        current_command: p[3].into(),
-        current_path: PathBuf::from(p[4]),
-        activity: p[5].parse().unwrap_or(0),
-    })
 }
 
 pub fn opencode_panes(panes: &[TmuxPane]) -> Vec<&TmuxPane> {

@@ -1,7 +1,10 @@
 use crate::builder::TreeBuilder;
 use crate::config::Config;
 use crate::logs;
-use crate::model::{FeedbackEntry, FeedbackType, Payload};
+use crate::metrics::{self, BuildTimings, Metrics};
+use crate::model::{Entry, FeedbackEntry, FeedbackType, Payload};
+use crate::service;
+use serde::{Deserialize, Serialize};
 
 pub struct Daemon {
     config: Config,
@@ -19,6 +22,9 @@ impl Daemon {
     }
 
     pub fn kill() {
+        if service::is_installed() {
+            let _ = service::stop();
+        }
         let pid_path = pid_path();
         let sock_path = sock_path();
 
@@ -50,16 +56,61 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread::{self};
 use std::time::{Duration, Instant};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const IDLE_KEEP_WARM_INTERVAL: Duration = Duration::from_secs(30);
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(400);
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
 const ATTACH_POLL: Duration = Duration::from_millis(250);
 const SPAWN_POLL_ATTEMPTS: usize = 120;
 const TAIL_HISTORY: usize = 30;
+const CACHE_SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedCache {
+    version: u32,
+    saved_at_ms: u128,
+    git: crate::git::DiskCache,
+    entries: Vec<Entry>,
+    entries_found: usize,
+}
+
+fn cache_path() -> PathBuf {
+    logs::state_dir().join("cache.json")
+}
+
+fn load_persisted_cache() -> Option<PersistedCache> {
+    let bytes = std::fs::read(cache_path()).ok()?;
+    let cache: PersistedCache = serde_json::from_slice(&bytes).ok()?;
+    (cache.version == 1).then_some(cache)
+}
+
+fn save_persisted_cache(builder: &TreeBuilder, payload: &Payload) {
+    let saved_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let cache = PersistedCache {
+        version: 1,
+        saved_at_ms,
+        git: builder.to_disk_cache(),
+        entries: payload.entries.clone(),
+        entries_found: payload.entries_found,
+    };
+    let path = cache_path();
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(bytes) = serde_json::to_vec(&cache) {
+        let _ = std::fs::write(&tmp, bytes);
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
 
 pub fn print_daemon_info() {
     let pid_path = self::pid_path();
@@ -79,6 +130,10 @@ pub fn print_daemon_info() {
     println!(" running={running}");
     println!("  sock  {}", sock_path.display());
     println!("  pid   {}", pid_path.display());
+    println!("  cache {}", cache_path().display());
+    if service::is_installed() {
+        println!("  sysd  {}", service::unit_path().display());
+    }
 }
 
 pub fn sock_path() -> PathBuf {
@@ -155,8 +210,109 @@ pub fn attach() -> ! {
     std::process::exit(0);
 }
 
+type ConfigLock = Arc<RwLock<Config>>;
+type FeedbackLock = Arc<RwLock<Vec<FeedbackEntry>>>;
+type ClientList = Arc<Mutex<Vec<UnixStream>>>;
+type PayloadBytes = Arc<RwLock<Vec<u8>>>;
+
+fn serialize_payload(
+    entries: Vec<Entry>,
+    config: &Config,
+    feedbacks: &[FeedbackEntry],
+    entries_found: usize,
+) -> Vec<u8> {
+    serde_json::to_vec(&Payload {
+        entries,
+        config: config.clone(),
+        feedbacks: feedbacks.to_vec(),
+        entries_found,
+    })
+    .unwrap_or_default()
+}
+
+fn build_payload(
+    config_lock: &ConfigLock,
+    feedback_lock: &FeedbackLock,
+    builder: &TreeBuilder,
+) -> (Vec<u8>, usize, BuildTimings) {
+    let config = config_lock.read().unwrap();
+    let feedbacks = feedback_lock.read().unwrap();
+    let (entries, mut timings) = builder.build(&config);
+    let entry_count = entries.len();
+    let t = Instant::now();
+    let bytes = serialize_payload(entries, &config, &feedbacks, entry_count);
+    timings.serialize_ms = t.elapsed().as_millis();
+    (bytes, entry_count, timings)
+}
+
+fn broadcast(data: &PayloadBytes, clients: &ClientList) -> bool {
+    let bytes = data.read().unwrap().clone();
+    let mut list = clients.lock().unwrap();
+    let mut i = 0;
+    let mut sent = false;
+    while i < list.len() {
+        if write_frame(&mut list[i], &bytes).is_ok() {
+            sent = true;
+            i += 1;
+        } else {
+            list.swap_remove(i);
+        }
+    }
+    sent
+}
+
+// Prunes dead client sockets and reports whether any clients remain. Needed
+// because identical payloads are never written, so dead peers would otherwise
+// linger in the client list forever.
+fn prune_dead(clients: &ClientList) -> bool {
+    let mut list = clients.lock().unwrap();
+    let mut i = 0;
+    while i < list.len() {
+        if is_dead(&mut list[i]) {
+            list.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    !list.is_empty()
+}
+
+fn is_dead(stream: &mut UnixStream) -> bool {
+    let _ = stream.set_nonblocking(true);
+    let mut b = [0u8; 1];
+    let dead = match stream.read(&mut b) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(_) => true,
+    };
+    let _ = stream.set_nonblocking(false);
+    dead
+}
+
+fn record_metrics(metrics: &Mutex<Metrics>, timings: &BuildTimings, builder: &TreeBuilder) {
+    let mut m = metrics.lock().unwrap();
+    m.record_build(timings);
+    m.git_spawns = builder.git_cache().spawns.load(std::sync::atomic::Ordering::Relaxed);
+    m.git_diff_hits =
+        builder.git_cache().diff_hits.load(std::sync::atomic::Ordering::Relaxed);
+    m.git_diff_misses =
+        builder.git_cache().diff_misses.load(std::sync::atomic::Ordering::Relaxed);
+    m.worktree_hits =
+        builder.git_cache().worktree_hits.load(std::sync::atomic::Ordering::Relaxed);
+    m.worktree_misses =
+        builder.git_cache().worktree_misses.load(std::sync::atomic::Ordering::Relaxed);
+    let stats = m.stats();
+    drop(m);
+    metrics::save(&stats);
+}
+
 pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
+    let under_systemd = service::under_systemd();
     if is_daemon_running() {
+        if under_systemd {
+            return Ok(());
+        }
         attach();
     }
 
@@ -166,6 +322,9 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
 
     let pid_path = pid_path();
     std::fs::write(&pid_path, std::process::id().to_string()).ok();
+    if under_systemd {
+        info!("running under systemd, idle timeout disabled");
+    }
 
     let sock_path = sock_path();
     let _ = std::fs::remove_file(&sock_path);
@@ -175,21 +334,49 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
     let config_lock = Arc::new(RwLock::new(config));
     let feedback_lock = Arc::new(RwLock::new(feedbacks));
     let builder = Arc::new(TreeBuilder::new());
-    let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::new(Mutex::new(Vec::new()));
+    let clients: ClientList = Arc::new(Mutex::new(Vec::new()));
+    let metrics = Arc::new(Mutex::new(Metrics::new()));
 
     info!(
         "daemon starting (timeout={}s)",
         config_lock.read().unwrap().daemon_timeout
     );
 
-    let data: Arc<RwLock<Vec<u8>>> = {
-        let (bytes, _) = build_payload(&config_lock, &feedback_lock, &builder);
-        Arc::new(RwLock::new(bytes))
+    // Serve the last-known state instantly; git caches are warmed from disk,
+    // then a background build reconciles with reality.
+    let mut initial_entries = Vec::new();
+    let mut initial_count = 0usize;
+    if let Some(cache) = load_persisted_cache() {
+        builder.load_disk_cache(&cache.git);
+        initial_entries = cache.entries;
+        initial_count = cache.entries_found;
+        info!(
+            "disk cache loaded ({} entries, {} diffs)",
+            initial_entries.len(),
+            cache.git.diffs.len()
+        );
+    } else {
+        info!("no disk cache, cold start");
+    }
+    let data: PayloadBytes = {
+        let (config, feedbacks) = (
+            config_lock.read().unwrap().clone(),
+            feedback_lock.read().unwrap().clone(),
+        );
+        Arc::new(RwLock::new(serialize_payload(
+            initial_entries,
+            &config,
+            &feedbacks,
+            initial_count,
+        )))
     };
-    info!("initial build done");
 
     let listener = UnixListener::bind(&sock_path)?;
     listener.set_nonblocking(true)?;
+
+    // Wakes the refresh thread as soon as a first client connects, so it
+    // rebuilds immediately instead of waiting for the next interval.
+    let wake: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
 
     if let Some(ref path) = config_file {
         let lock = config_lock.clone();
@@ -199,6 +386,8 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
         let path = path.clone();
         let fb_lock = feedback_lock.clone();
         let clients = clients.clone();
+        let wake = wake.clone();
+        let metrics = metrics.clone();
         thread::spawn(move || {
             let mut last_mtime = std::fs::metadata(&path)
                 .ok()
@@ -224,20 +413,14 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                             if let Ok(mut f) = fb_lock.write() {
                                 *f = fb;
                             }
-                            let (bytes, _) = build_payload(&lock, &fb_lock, &builder);
+                            let (bytes, _count, timings) =
+                                build_payload(&lock, &fb_lock, &builder);
                             if let Ok(mut d) = data.write() {
                                 *d = bytes;
                             }
-                            let d = data.read().unwrap();
-                            let mut list = clients.lock().unwrap();
-                            let mut i = 0;
-                            while i < list.len() {
-                                if write_frame(&mut list[i], &d).is_ok() {
-                                    i += 1;
-                                } else {
-                                    list.swap_remove(i);
-                                }
-                            }
+                            broadcast(&data, &clients);
+                            record_metrics(&metrics, &timings, &builder);
+                            wake.1.notify_all();
                         }
                         Err(e) => {
                             warn!("failed to read config: {e}");
@@ -263,31 +446,50 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
         let feedback_lock = feedback_lock.clone();
         let builder = builder.clone();
         let clients = clients.clone();
+        let wake = wake.clone();
+        let metrics = metrics.clone();
         thread::spawn(move || {
-            let mut has_entries = false;
+            let mut last_cache_save = Instant::now() - CACHE_SAVE_DEBOUNCE;
             loop {
-                let interval = if has_entries {
+                let has_clients = prune_dead(&clients);
+                let interval = if has_clients {
                     REFRESH_INTERVAL
                 } else {
-                    Duration::from_millis(500)
+                    IDLE_KEEP_WARM_INTERVAL
                 };
-                thread::sleep(interval);
-                let (bytes, entry_count) =
+                {
+                    let (lock, cvar) = &*wake;
+                    let pending = lock.lock().unwrap();
+                    let (mut guard, _) = cvar.wait_timeout(pending, interval).unwrap();
+                    *guard = false;
+                }
+                let start = Instant::now();
+                let (bytes, _count, timings) =
                     build_payload(&config_lock, &feedback_lock, &builder);
-                has_entries = entry_count > 0;
-                if let Ok(mut d) = data.write() {
-                    *d = bytes;
-                }
-                let d = data.read().unwrap();
-                let mut list = clients.lock().unwrap();
-                let mut i = 0;
-                while i < list.len() {
-                    if write_frame(&mut list[i], &d).is_ok() {
-                        i += 1;
+                let changed = {
+                    let mut d = data.write().unwrap();
+                    if *d == bytes {
+                        false
                     } else {
-                        list.swap_remove(i);
+                        *d = bytes;
+                        true
                     }
+                };
+                if changed {
+                    broadcast(&data, &clients);
+                    metrics.lock().unwrap().pushes_sent += 1;
+                    if let Ok(bytes) = data.read().map(|d| d.clone())
+                        && let Ok(payload) = serde_json::from_slice::<Payload>(&bytes)
+                        && last_cache_save.elapsed() > CACHE_SAVE_DEBOUNCE
+                    {
+                        save_persisted_cache(&builder, &payload);
+                        last_cache_save = Instant::now();
+                    }
+                } else {
+                    metrics.lock().unwrap().pushes_skipped += 1;
                 }
+                record_metrics(&metrics, &timings, &builder);
+                info!("refresh in {}ms (changed={changed})", start.elapsed().as_millis());
             }
         });
     }
@@ -335,7 +537,15 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                 if let Ok(bytes) = data.read().map(|d| d.clone())
                     && write_frame(&mut stream, &bytes).is_ok()
                 {
-                    clients.lock().unwrap().push(stream);
+                    let mut list = clients.lock().unwrap();
+                    let first = list.is_empty();
+                    list.push(stream);
+                    if first {
+                        let (lock, cvar) = &*wake;
+                        let mut pending = lock.lock().unwrap();
+                        *pending = true;
+                        cvar.notify_all();
+                    }
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -343,15 +553,21 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     .read()
                     .map(|c| c.daemon_timeout_duration())
                     .unwrap_or_else(|_| Duration::from_secs(600));
-                if last_connection.elapsed() > idle_timeout && clients.lock().unwrap().is_empty() {
+                if !under_systemd
+                    && last_connection.elapsed() > idle_timeout
+                    && clients.lock().unwrap().is_empty()
+                {
                     info!("idle timeout reached, shutting down daemon");
+                    save_disk_cache_sync(&builder, &data);
                     break;
                 }
                 thread::sleep(ACCEPT_POLL);
             }
             Err(e) => {
                 error!("accept error: {}", e);
-                break;
+                let _ = std::fs::remove_file(&sock_path);
+                let _ = std::fs::remove_file(&pid_path);
+                return Err(e);
             }
         }
     }
@@ -361,23 +577,12 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
     Ok(())
 }
 
-fn build_payload(
-    config_lock: &Arc<RwLock<Config>>,
-    feedback_lock: &Arc<RwLock<Vec<FeedbackEntry>>>,
-    builder: &TreeBuilder,
-) -> (Vec<u8>, usize) {
-    let config = config_lock.read().unwrap();
-    let feedbacks = feedback_lock.read().unwrap();
-    let entries = builder.build(&config.path);
-    let entry_count = entries.len();
-    let bytes = serde_json::to_vec(&Payload {
-        entries,
-        config: config.clone(),
-        feedbacks: feedbacks.clone(),
-        entries_found: entry_count,
-    })
-    .unwrap_or_default();
-    (bytes, entry_count)
+fn save_disk_cache_sync(builder: &TreeBuilder, data: &PayloadBytes) {
+    if let Ok(bytes) = data.read().map(|d| d.clone())
+        && let Ok(payload) = serde_json::from_slice::<Payload>(&bytes)
+    {
+        save_persisted_cache(builder, &payload);
+    }
 }
 
 fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> std::io::Result<()> {
@@ -483,27 +688,11 @@ pub fn initial_fetch(overrides: &[(String, Option<String>)]) -> Payload {
 
     let poll = || thread::sleep(Duration::from_millis(50));
 
-    let mut bytes = fetch_or_spawn(overrides, |_| poll());
-
-    if bytes.is_some() {
-        let window = Instant::now();
-        let max_wait = Duration::from_secs(2);
-        loop {
-            let timed_out = window.elapsed() > max_wait;
-            if let Some(payload) = bytes
-                .as_deref()
-                .and_then(|b| serde_json::from_slice::<Payload>(b).ok())
-            {
-                if !payload.entries.is_empty() || timed_out {
-                    info!("fetch: {}ms", fetch_start.elapsed().as_millis());
-                    return payload;
-                }
-            } else if timed_out {
-                break;
-            }
-            poll();
-            bytes = fetch_once();
-        }
+    if let Some(bytes) = fetch_or_spawn(overrides, |_| poll())
+        && let Ok(payload) = serde_json::from_slice::<Payload>(&bytes)
+    {
+        info!("fetch: {}ms", fetch_start.elapsed().as_millis());
+        return payload;
     }
 
     info!("fetch: {}ms", fetch_start.elapsed().as_millis());

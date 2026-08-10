@@ -71,12 +71,15 @@ impl Config {
         Duration::from_secs(self.daemon_timeout)
     }
 
-    pub fn config_path() -> Option<PathBuf> {
-        let base = match std::env::var("XDG_CONFIG_HOME") {
+    pub(crate) fn config_base() -> PathBuf {
+        match std::env::var("XDG_CONFIG_HOME") {
             Ok(x) if !x.is_empty() => PathBuf::from(x),
             _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"),
-        };
-        let ramo_dir = base.join("ramo");
+        }
+    }
+
+    pub fn config_path() -> Option<PathBuf> {
+        let ramo_dir = Self::config_base().join("ramo");
         for name in ["config", "config.ramo"] {
             let p = ramo_dir.join(name);
             if p.is_file() {
@@ -84,6 +87,11 @@ impl Config {
             }
         }
         None
+    }
+
+    pub fn config_dir() -> Option<PathBuf> {
+        let dir = Self::config_base().join("ramo");
+        dir.is_dir().then_some(dir)
     }
 
     pub fn new() -> (Self, Vec<FeedbackEntry>) {

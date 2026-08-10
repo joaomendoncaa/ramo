@@ -6,6 +6,9 @@ pub enum Daemon {
     Start,
     Kill,
     Logs,
+    Stats,
+    Install,
+    Uninstall,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15,6 +18,7 @@ pub enum Command {
     Kill,
     Help,
     Config,
+    SelfDestruct,
     Unknown(String),
 }
 
@@ -40,6 +44,9 @@ impl Cli {
                             "start" => Command::Daemon(Daemon::Start),
                             "kill" => Command::Daemon(Daemon::Kill),
                             "logs" => Command::Daemon(Daemon::Logs),
+                            "stats" => Command::Daemon(Daemon::Stats),
+                            "install" => Command::Daemon(Daemon::Install),
+                            "uninstall" => Command::Daemon(Daemon::Uninstall),
                             _ => Command::Unknown(unknown_cmd(&args)),
                         }
                     } else {
@@ -47,6 +54,7 @@ impl Cli {
                     };
                 }
                 "kill" => command = Command::Kill,
+                "self-destruct" => command = Command::SelfDestruct,
                 "config" => command = Command::Config,
                 a if a.starts_with("--") => {
                     let rest = &a[2..];
@@ -76,24 +84,28 @@ use `ramo help` to see usage
     }
 
     pub fn help(&self) -> String {
-        format!(
-            "
-
-ramo                Open picker (starts daemon if not running yet)
-
-ramo daemon         Print current daemon info
-ramo daemon start   Start a daemon
-ramo daemon kill    Kill running daemon
-ramo daemon logs    Tail daemon logs
-
-ramo kill           Alias for daemon kill
-
-ramo config         Print config path and contents
-
-ramo help           Print this help
-
-Flags override config keys (e.g. --path=/custom/path)",
-        )
+        "\n\
+\n\
+ramo                Open picker (starts daemon if not running yet)\n\
+\n\
+ramo daemon         Print current daemon info\n\
+ramo daemon start   Start a daemon\n\
+ramo daemon kill    Kill running daemon\n\
+ramo daemon logs    Tail daemon logs\n\
+ramo daemon stats   Print daemon performance stats\n\
+ramo daemon install     Install systemd user service (daemon starts at login)\n\
+ramo daemon uninstall   Remove the systemd user service\n\
+\n\
+ramo kill           Alias for daemon kill\n\
+\n\
+ramo config         Print config path and contents\n\
+\n\
+ramo self-destruct  Remove ramo from your system (daemon, data, binary)\n\
+\n\
+ramo help           Print this help\n\
+\n\
+Flags override config keys (e.g. --path=/custom/path)"
+            .to_string()
     }
 }
 
