@@ -242,6 +242,9 @@ impl Picker {
         if n == 0 {
             return;
         }
+        // Scroll bookkeeping runs in virtual-row space, but the cursor keeps
+        // stepping over entries only — gaps are never landed on.
+        let max_row = self.rows().len().saturating_sub(1);
         if dir < 0 {
             let step = (-dir) as usize;
             self.scroll = self.scroll.saturating_sub(step);
@@ -249,8 +252,8 @@ impl Picker {
         }
         if dir > 0 {
             let step = dir as usize;
+            self.scroll = (self.scroll + step).min(max_row);
             let max = n.saturating_sub(1);
-            self.scroll = (self.scroll + step).min(max);
             self.cursor = (self.cursor + step).min(max);
         }
     }
@@ -358,21 +361,22 @@ impl Picker {
         }
 
         let vh = area.height as usize;
-        let n = self.filtered.len();
-        if n == 0 {
+        let rows = self.rows();
+        if rows.is_empty() {
             return None;
         }
 
         let view_y = (row - area.y) as usize;
-        let padding = vh.saturating_sub(n);
+        let padding = vh.saturating_sub(rows.len());
         if view_y < padding {
             return None;
         }
 
-        let scroll = self.scroll;
-        let entry_relative = view_y - padding;
-        let idx = scroll + entry_relative;
-
-        if idx < n { Some(idx) } else { None }
+        // Gap rows map to None: the pointer can't select or hover them,
+        // just like the keyboard navigation skips them.
+        match rows.get(self.scroll + (view_y - padding)) {
+            Some(Some(p)) => Some(*p),
+            _ => None,
+        }
     }
 }

@@ -1,5 +1,5 @@
 use crate::clickable::{Action, Clickable, HOVER_BG, HOVER_FG};
-use crate::model::{Entry, EntryType, FeedbackEntry, FeedbackType};
+use crate::model::{Entry, EntryType, FeedbackEntry, FeedbackType, LINE_VERT};
 use crate::picker::Picker;
 use ratatui::{
     Frame,
@@ -25,8 +25,19 @@ pub struct Renderer {}
 
 impl Renderer {
     pub fn render(frame: &mut Frame, picker: &mut Picker) {
-        let mut constraints = vec![Constraint::Min(1), Constraint::Length(1)];
+        // style-entries-gap also pads the input row, above and below. These
+        // are dedicated layout slots, kept outside the entries area so
+        // scrolling, hit-testing and the row map stay entry-only.
+        let gap = picker.config.style_entries_gap.min(u64::from(u16::MAX)) as u16;
 
+        let mut constraints = vec![Constraint::Min(1)];
+        if gap > 0 {
+            constraints.push(Constraint::Length(gap));
+        }
+        constraints.push(Constraint::Length(1));
+        if gap > 0 {
+            constraints.push(Constraint::Length(gap));
+        }
         if !picker.config.hide_hints_footer {
             constraints.push(Constraint::Length(1));
         }
@@ -37,7 +48,11 @@ impl Renderer {
         let slots = Layout::vertical(constraints).split(frame.area());
         let slot_entries = slots[0];
         let slot_entries_height = slot_entries.height as usize;
-        let slot_input = slots[1];
+        let input_idx = if gap > 0 { 2 } else { 1 };
+        // First slot past the input block, skipping the below-input padding
+        // so hints stay pinned to the last rows.
+        let after_input_idx = input_idx + 1 + usize::from(gap > 0);
+        let slot_input = slots[input_idx];
 
         picker.slot_entries = slot_entries;
 
@@ -48,27 +63,33 @@ impl Renderer {
 
         let cursor = picker.cursor;
         let n = picker.filtered.len();
+        // Gaps are decorative rows layered between entries; navigation and
+        // visibility stay in entry space, so map the cursor to its row here
+        // and run all viewport math over the virtual rows.
+        let rows = picker.rows();
+        let total = rows.len();
+        let cursor_row = rows.iter().position(|&r| r == Some(cursor)).unwrap_or(0);
 
         picker.reveal_open = false;
 
         let scroll = if picker.mouse_hover {
             picker.scroll
         } else {
-            let s = if n <= slot_entries_height {
+            let s = if total <= slot_entries_height {
                 0
-            } else if cursor < picker.scroll {
-                cursor
-            } else if cursor >= picker.scroll + slot_entries_height {
-                let for_after = n.saturating_sub(slot_entries_height);
-                if for_after <= cursor {
+            } else if cursor_row < picker.scroll {
+                cursor_row
+            } else if cursor_row >= picker.scroll + slot_entries_height {
+                let for_after = total.saturating_sub(slot_entries_height);
+                if for_after <= cursor_row {
                     for_after
                 } else {
-                    cursor
+                    cursor_row
                 }
             } else {
                 picker.scroll
             };
-            picker.scroll = s.min(n.saturating_sub(slot_entries_height));
+            picker.scroll = s.min(total.saturating_sub(slot_entries_height));
             picker.scroll
         };
 
@@ -90,11 +111,11 @@ impl Renderer {
         } else {
             0
         };
-        let padding = slot_entries_height.saturating_sub(n);
+        let padding = slot_entries_height.saturating_sub(total);
 
         picker.clickables.clear();
         if !buttons.is_empty() {
-            let by = slot_entries.y + padding as u16 + (cursor - scroll) as u16;
+            let by = slot_entries.y + padding as u16 + (cursor_row - scroll) as u16;
             let start_x = slot_entries.x + entry_text_width + 2;
             let mut bx = start_x;
             for (text, action) in &buttons {
@@ -106,49 +127,71 @@ impl Renderer {
                 bx += w + 1;
             }
         }
-        Self::build_hints_clickables(picker, &slots);
+        if !picker.config.hide_hints_footer {
+            Self::build_hints_clickables(picker, slots[after_input_idx]);
+        }
 
         let entries = &picker.entries;
         let filtered = &picker.filtered;
         let cmd = picker.command_mode;
         let mut lines: Vec<Line> = Vec::with_capacity(slot_entries_height);
 
-        for _ in 0..slot_entries_height.saturating_sub(n) {
+        for _ in 0..slot_entries_height.saturating_sub(total) {
             lines.push(Line::raw(""));
         }
 
-        for i in scroll..n {
-            if lines.len() >= slot_entries_height {
-                break;
-            }
-            let entry = &entries[filtered[i]];
-            let mut line = Self::entry(entry, spinner, i == cursor, cmd);
-            if cmd && i == cursor && !buttons.is_empty() {
-                line.spans
-                    .push(Span::styled("  ", Style::default().bg(Color::Reset)));
-                for (bi, (text, _action)) in buttons.iter().enumerate() {
-                    let is_hovered = picker.clickables.iter().any(|c| {
-                        c.action == *_action
-                            && c.contains(picker.last_mouse_col, picker.last_mouse_row)
-                    });
-                    let style = if is_hovered {
-                        Style::default().bg(HOVER_BG).fg(HOVER_FG)
-                    } else {
-                        Style::default().bg(Color::Reset)
-                    };
-                    line.spans.push(Span::styled(text.as_str(), style));
-                    if bi < buttons.len() - 1 {
+        let mut r = scroll;
+        while r < total && lines.len() < slot_entries_height {
+            match rows[r] {
+                Some(p) => {
+                    let entry = &entries[filtered[p]];
+                    let mut line = Self::entry(entry, spinner, p == cursor, cmd);
+                    if cmd && p == cursor && !buttons.is_empty() {
                         line.spans
-                            .push(Span::styled(" ", Style::default().bg(Color::Reset)));
+                            .push(Span::styled("  ", Style::default().bg(Color::Reset)));
+                        for (bi, (text, _action)) in buttons.iter().enumerate() {
+                            let is_hovered = picker.clickables.iter().any(|c| {
+                                c.action == *_action
+                                    && c.contains(picker.last_mouse_col, picker.last_mouse_row)
+                            });
+                            let style = if is_hovered {
+                                Style::default().bg(HOVER_BG).fg(HOVER_FG)
+                            } else {
+                                Style::default().bg(Color::Reset)
+                            };
+                            line.spans.push(Span::styled(text.as_str(), style));
+                            if bi < buttons.len() - 1 {
+                                line.spans
+                                    .push(Span::styled(" ", Style::default().bg(Color::Reset)));
+                            }
+                        }
                     }
+                    lines.push(line);
+                }
+                None => {
+                    // Gap row: redraw the ancestor spine of whichever entry
+                    // follows so open subtrees stay connected across it.
+                    let next = rows
+                        .get(r + 1)
+                        .copied()
+                        .flatten()
+                        .map(|p| &entries[filtered[p]]);
+                    lines.push(match next {
+                        Some(e) => Self::gap_line(e, cmd),
+                        None => Line::raw(""),
+                    });
                 }
             }
-            lines.push(line);
+            r += 1;
         }
 
         frame.render_widget(Paragraph::new(lines), slot_entries);
+        if gap > 0 {
+            frame.render_widget(Paragraph::new(""), slots[1]);
+            frame.render_widget(Paragraph::new(""), slots[input_idx + 1]);
+        }
         frame.render_widget(Paragraph::new(Self::input(picker)), slot_input);
-        let mut idx = 2usize;
+        let mut idx = after_input_idx;
         if !picker.config.hide_hints_footer {
             let hovered_action = picker
                 .clickables
@@ -242,6 +285,25 @@ impl Renderer {
         line
     }
 
+    // Decorative row inserted before `entry` when style-entries-gap > 0.
+    // Repeats the ancestor spine and adds a vertical stub so children keep
+    // hanging from their parent across the gap; roots get a blank row.
+    fn gap_line(entry: &Entry, dimmed: bool) -> Line<'static> {
+        let mut spine = String::new();
+        for &last in &entry.ancestors {
+            spine.push_str(if last { "  " } else { "│ " });
+        }
+        if entry.depth > 0 {
+            spine.push(LINE_VERT);
+        }
+        let style = if dimmed {
+            Style::default().fg(CMD_DIM)
+        } else {
+            Style::default().fg(CONNECTOR)
+        };
+        Line::from(vec![Span::styled(spine, style)])
+    }
+
     pub fn loader(frame: &mut Frame, area: Rect, spinner_frame: usize) {
         let spinner = SPINNER_DAEMON[spinner_frame % SPINNER_DAEMON.len()];
         let text = format!("{} Warming up the engines", spinner);
@@ -303,11 +365,10 @@ impl Renderer {
         Line::from(spans)
     }
 
-    fn build_hints_clickables(picker: &mut Picker, slots: &[Rect]) {
+    fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
         if picker.config.hide_hints_footer {
             return;
         }
-        let hints_slot = slots[2];
         let y = hints_slot.y;
         let mut x = hints_slot.x;
 
@@ -400,5 +461,46 @@ impl Renderer {
             format!("\u{26a0} {}", feedback.message),
             Style::default().fg(fg),
         )])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Entry, EntryType};
+    use std::path::PathBuf;
+
+    fn entry(kind: EntryType, depth: usize) -> Entry {
+        Entry {
+            kind,
+            label: String::new(),
+            path: PathBuf::from("/tmp"),
+            changes: None,
+            is_open: false,
+            is_running: false,
+            depth,
+            ancestors: vec![],
+            is_last: false,
+            search_text: String::new(),
+            goto: None,
+            parent: None,
+            connector: String::new(),
+            search_text_lower: String::new(),
+        }
+    }
+
+    fn spine_of(entry: &Entry) -> String {
+        match Renderer::gap_line(entry, false).spans.first() {
+            Some(span) => span.content.to_string(),
+            None => String::new(),
+        }
+    }
+
+    // Roots get a fully blank row; children keep hanging from their parent
+    // via the │ stub.
+    #[test]
+    fn gap_spine_follows_depth() {
+        assert_eq!(spine_of(&entry(EntryType::Dir, 0)), "");
+        assert_eq!(spine_of(&entry(EntryType::Worktree, 1)), "│");
     }
 }

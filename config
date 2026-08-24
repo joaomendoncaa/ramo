@@ -40,7 +40,7 @@
 # ██║     ██║   ██║██║╚██╗██║██╔══╝  ██║██║   ██║██╗
 # ╚██████╗╚██████╔╝██║ ╚████║██║     ██║╚██████╔╝╚═╝
 #  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝
-#
+
 # you can define a custom path for the directories
 # you want to create sessions from, including
 # where you want to host your worktrees
@@ -77,6 +77,10 @@ style-icon-worktree = ⑂
 style-icon-agent-idle = ✓
 style-icon-agent-running = ⠋⠙⠹⠸⢰⣰⣠⣄⣆⡆⠇⠏
 style-icon-input = ▸
+
+# add empty lines in-between entries
+# (the same count pads the input row, above and below)
+style-entries-gap = 0
 
 # the daemon is thin when idle: with no picker connected it only does a
 # light keep-warm refresh every 30s (~0% CPU), so it can happily run at

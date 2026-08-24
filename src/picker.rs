@@ -149,6 +149,25 @@ impl Picker {
         });
     }
 
+    // Virtual row layout of the current view: `Some(p)` renders filtered
+    // position p, `None` is a decorative gap row (style-entries-gap). Gaps
+    // precede dirs and worktrees only — agents hug their parent — and stay
+    // outside navigation entirely: the cursor and every visibility check
+    // speak in entries, never in gap rows.
+    pub(crate) fn rows(&self) -> Vec<Option<usize>> {
+        let gap = self.config.style_entries_gap as usize;
+        let mut rows = Vec::with_capacity(self.filtered.len());
+        for p in 0..self.filtered.len() {
+            if gap > 0 && p > 0 && self.entries[self.filtered[p]].kind != EntryType::Agent {
+                for _ in 0..gap {
+                    rows.push(None);
+                }
+            }
+            rows.push(Some(p));
+        }
+        rows
+    }
+
     pub fn cursor_entry_buttons(&self) -> Vec<(String, Action)> {
         if !self.command_mode {
             return vec![];
@@ -202,5 +221,106 @@ impl Picker {
                 self.schedule_refresh();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Entry, EntryType};
+    use std::path::PathBuf;
+
+    fn entry(kind: EntryType) -> Entry {
+        Entry {
+            kind,
+            label: String::new(),
+            path: PathBuf::from("/tmp"),
+            changes: None,
+            is_open: false,
+            is_running: false,
+            depth: 0,
+            ancestors: vec![],
+            is_last: false,
+            search_text: String::new(),
+            goto: None,
+            parent: None,
+            connector: String::new(),
+            search_text_lower: String::new(),
+        }
+    }
+
+    fn picker_with(kinds: &[EntryType], gap: u64) -> Picker {
+        let (tx, rx) = mpsc::channel();
+        let config = Config {
+            style_entries_gap: gap,
+            ..Config::default()
+        };
+        Picker {
+            entries: kinds.iter().map(|k| entry(k.clone())).collect(),
+            filtered: (0..kinds.len()).collect(),
+            cursor: 0,
+            input: String::new(),
+            input_cursor: 0,
+            spinner: 0,
+            started_at: Instant::now(),
+            last_spinner: Instant::now(),
+            quit: false,
+            pending_goto: None,
+            tx,
+            rx,
+            slot_entries: Rect::default(),
+            scroll: 0,
+            mouse_hover: false,
+            auto_close: true,
+            command_mode: false,
+            reveal_open: false,
+            config,
+            feedbacks: vec![],
+            entries_found: 0,
+            clickables: vec![],
+            last_mouse_col: 0,
+            last_mouse_row: 0,
+        }
+    }
+
+    fn row_marks(rows: &[Option<usize>]) -> String {
+        rows.iter()
+            .map(|r| match r {
+                Some(_) => 'e',
+                None => '.',
+            })
+            .collect()
+    }
+
+    // Dirs and worktrees get gaps before them, agents hug their parent.
+    #[test]
+    fn gaps_skip_agents() {
+        let picker = picker_with(
+            &[
+                EntryType::Dir,
+                EntryType::Worktree,
+                EntryType::Agent,
+                EntryType::Agent,
+                EntryType::Worktree,
+                EntryType::Dir,
+            ],
+            1,
+        );
+        assert_eq!(row_marks(&picker.rows()), "e.eee.e.e");
+    }
+
+    #[test]
+    fn no_first_gap_and_multi_row_gaps() {
+        let picker = picker_with(&[EntryType::Dir, EntryType::Dir], 2);
+        assert_eq!(row_marks(&picker.rows()), "e..e");
+    }
+
+    #[test]
+    fn zero_gap_is_plain_list() {
+        let picker = picker_with(
+            &[EntryType::Dir, EntryType::Worktree, EntryType::Agent],
+            0,
+        );
+        assert_eq!(row_marks(&picker.rows()), "eee");
     }
 }

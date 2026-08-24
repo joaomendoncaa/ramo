@@ -30,6 +30,7 @@ pub struct Config {
     pub style_icon_agent_idle: String,
     pub style_icon_agent_running: String,
     pub style_icon_input: String,
+    pub style_entries_gap: u64,
 }
 
 impl Default for Config {
@@ -62,6 +63,7 @@ impl Default for Config {
             style_icon_agent_idle: "✓".to_string(),
             style_icon_agent_running: "⠋⠙⠹⠸⢰⣰⣠⣄⣆⡆⠇⠏".to_string(),
             style_icon_input: "▸".to_string(),
+            style_entries_gap: 0,
         }
     }
 }
@@ -413,6 +415,19 @@ impl Config {
                 self.style_icon_input = value.to_string();
                 true
             }
+            "style-entries-gap" => match parse_u64(key, value) {
+                Ok(n) => {
+                    self.style_entries_gap = n;
+                    true
+                }
+                Err(msg) => {
+                    feedbacks.push(FeedbackEntry {
+                        level: FeedbackType::Error,
+                        message: msg,
+                    });
+                    true
+                }
+            },
             _ => false,
         }
     }
@@ -514,6 +529,10 @@ impl Config {
             }
             "style-icon-input" => {
                 self.style_icon_input = default.style_icon_input;
+                true
+            }
+            "style-entries-gap" => {
+                self.style_entries_gap = default.style_entries_gap;
                 true
             }
             _ => false,

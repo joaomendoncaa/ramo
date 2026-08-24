@@ -2,7 +2,7 @@ use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-const LINE_VERT: char = '\u{2502}';
+pub(crate) const LINE_VERT: char = '\u{2502}';
 const CORNER_BL: char = '\u{2514}';
 const WORKTREE: char = '\u{2442}';
 const CHECKED: char = '\u{2713}';
