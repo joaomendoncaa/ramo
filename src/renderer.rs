@@ -53,7 +53,13 @@ fn prepare_slots(picker: &mut Picker, area: Rect) -> Slots {
     let entries = raw[0];
     let input = raw[input_idx];
     picker.slot_entries = entries;
-    Slots { entries, input, after, gap, raw }
+    Slots {
+        entries,
+        input,
+        after,
+        gap,
+        raw,
+    }
 }
 fn render_bottom(frame: &mut Frame, picker: &mut Picker, slots: &Slots) {
     if slots.gap > 0 {
@@ -181,7 +187,10 @@ pub fn render(frame: &mut Frame, picker: &mut Picker) {
                         if is_hovered {
                             line.spans.push(Span::styled(
                                 key,
-                                Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .bg(HOVER_BG)
+                                    .fg(HOVER_FG)
+                                    .add_modifier(Modifier::BOLD),
                             ));
                             line.spans.push(Span::styled(
                                 desc,
@@ -342,11 +351,12 @@ pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Li
             }
         }
     };
-    let marker_style = if entry.kind == EntryType::Dir && entry.is_open && !effective_dim && !is_cursor {
-        Style::default().fg(marker_fg).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(marker_fg)
-    };
+    let marker_style =
+        if entry.kind == EntryType::Dir && entry.is_open && !effective_dim && !is_cursor {
+            Style::default().fg(marker_fg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(marker_fg)
+        };
     let connector_style = if effective_dim {
         Style::default().fg(CMD_DIM)
     } else {
@@ -417,7 +427,9 @@ fn cursor_line(prefix: String, input: &str, pos: usize, dim: bool) -> Line<'_> {
     let prompt_style = if dim {
         dim_style.add_modifier(Modifier::BOLD)
     } else {
-        Style::default().bg(Color::Reset).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(Color::Reset)
+            .add_modifier(Modifier::BOLD)
     };
     let cursor_style = if dim {
         dim_style
@@ -428,13 +440,25 @@ fn cursor_line(prefix: String, input: &str, pos: usize, dim: bool) -> Line<'_> {
     if input.is_empty() {
         spans.push(Span::styled(" ", cursor_style));
     } else if pos == input.len() {
-        let text = if dim { Span::styled(input, dim_style) } else { Span::raw(input) };
+        let text = if dim {
+            Span::styled(input, dim_style)
+        } else {
+            Span::raw(input)
+        };
         spans.push(text);
         spans.push(Span::styled(" ", cursor_style));
     } else {
-        let before = if dim { Span::styled(&input[..pos], dim_style) } else { Span::raw(&input[..pos]) };
+        let before = if dim {
+            Span::styled(&input[..pos], dim_style)
+        } else {
+            Span::raw(&input[..pos])
+        };
         let at = &input[pos..=pos];
-        let after = if dim { Span::styled(&input[pos + 1..], dim_style) } else { Span::raw(&input[pos + 1..]) };
+        let after = if dim {
+            Span::styled(&input[pos + 1..], dim_style)
+        } else {
+            Span::raw(&input[pos + 1..])
+        };
         spans.push(before);
         spans.push(Span::styled(at, cursor_style));
         spans.push(after);
@@ -445,7 +469,12 @@ fn cursor_line(prefix: String, input: &str, pos: usize, dim: bool) -> Line<'_> {
 pub fn help_input(picker: &Picker) -> Line<'_> {
     if picker.mode == Mode::HelpEditing {
         if let Some(edit) = &picker.help_edit {
-            return cursor_line(format!("▸ {} = ", edit.key), &picker.input, picker.input_cursor, false);
+            return cursor_line(
+                format!("▸ {} = ", edit.key),
+                &picker.input,
+                picker.input_cursor,
+                false,
+            );
         }
     }
     if picker.mode == Mode::Help {
@@ -455,7 +484,12 @@ pub fn help_input(picker: &Picker) -> Line<'_> {
 }
 
 pub fn input_line(picker: &Picker) -> Line<'_> {
-    cursor_line("▸ ".to_string(), &picker.input, picker.input_cursor, picker.mode == Mode::Command)
+    cursor_line(
+        "▸ ".to_string(),
+        &picker.input,
+        picker.input_cursor,
+        picker.mode == Mode::Command,
+    )
 }
 
 fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
@@ -465,7 +499,15 @@ fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
     let y = hints_slot.y;
     let mut x = hints_slot.x;
     match picker.mode {
-        Mode::Help | Mode::HelpEditing => {
+        Mode::HelpEditing => {
+            x += (" Help · Editing ".chars().count() + 2) as u16;
+            let w = 3 + " Exit Edit Mode".len();
+            picker.clickables.push(Clickable {
+                rect: Rect::new(x, y, w as u16, 1),
+                action: Action::ExitHelp,
+            });
+        }
+        Mode::Help => {
             x += (" Help ".len() + 2) as u16;
             let w = 3 + " Exit Help".len();
             picker.clickables.push(Clickable {
@@ -504,14 +546,37 @@ fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
 }
 
 fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
-    let hk = Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD);
+    let hk = Style::default()
+        .bg(HOVER_BG)
+        .fg(HOVER_FG)
+        .add_modifier(Modifier::BOLD);
     let hd = Style::default().bg(HOVER_BG).fg(HOVER_FG);
-    let sk = Style::default().bg(Color::Reset).add_modifier(Modifier::BOLD);
-    let sd = Style::default().bg(Color::Reset).add_modifier(Modifier::DIM);
+    let sk = Style::default()
+        .bg(Color::Reset)
+        .add_modifier(Modifier::BOLD);
+    let sd = Style::default()
+        .bg(Color::Reset)
+        .add_modifier(Modifier::DIM);
     match picker.mode {
-        Mode::Help | Mode::HelpEditing => {
+        Mode::HelpEditing => {
             let exit_hovered = hovered_action == Some(Action::ExitHelp);
-            let badge = Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD);
+            let badge = Style::default()
+                .bg(HOVER_BG)
+                .fg(HOVER_FG)
+                .add_modifier(Modifier::BOLD);
+            Line::from(vec![
+                Span::styled(" Help · Editing ", badge),
+                Span::styled("  ", Style::default()),
+                Span::styled("ESC", if exit_hovered { hk } else { sk }),
+                Span::styled(" Exit Edit Mode", if exit_hovered { hd } else { sd }),
+            ])
+        }
+        Mode::Help => {
+            let exit_hovered = hovered_action == Some(Action::ExitHelp);
+            let badge = Style::default()
+                .bg(HOVER_BG)
+                .fg(HOVER_FG)
+                .add_modifier(Modifier::BOLD);
             Line::from(vec![
                 Span::styled(" Help ", badge),
                 Span::styled("  ", Style::default()),
@@ -519,14 +584,17 @@ fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
                 Span::styled(" Exit Help  ", if exit_hovered { hd } else { sd }),
                 Span::styled("↑↓", sk),
                 Span::styled(" Navigate  ", sd),
-                Span::styled("Enter", sk),
+                Span::styled("Return", sk),
                 Span::styled(" Edit", sd),
             ])
         }
         Mode::Command => {
             let exit_hovered = hovered_action == Some(Action::ExitCommandMode);
             let help_hovered = hovered_action == Some(Action::HelpMode);
-            let badge = Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD);
+            let badge = Style::default()
+                .bg(HOVER_BG)
+                .fg(HOVER_FG)
+                .add_modifier(Modifier::BOLD);
             Line::from(vec![
                 Span::styled(" Command ", badge),
                 Span::styled("  ", Style::default()),

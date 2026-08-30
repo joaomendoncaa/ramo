@@ -322,7 +322,13 @@ impl Picker {
             Action::CommandMode => self.mode = Mode::Command,
             Action::ExitCommandMode => self.mode = Mode::Normal,
             Action::HelpMode => self.enter_help(),
-            Action::ExitHelp => self.exit_help(),
+            Action::ExitHelp => {
+                if self.mode == Mode::HelpEditing {
+                    self.cancel_help_edit();
+                } else {
+                    self.exit_help();
+                }
+            }
             Action::KillSession => self.execute_kill_session(),
             Action::OpenDetached => self.open_detached(),
         }
