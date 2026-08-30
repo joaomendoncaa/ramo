@@ -376,13 +376,7 @@ pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Li
         Span::styled(entry.label.as_str(), label_style),
     ];
     if let Some(branch) = &entry.branch {
-        let branch_style = if effective_dim {
-            Style::default().fg(CMD_DIM)
-        } else if is_cursor {
-            Style::default().fg(Color::White).add_modifier(Modifier::DIM)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
+        let branch_style = if effective_dim { Style::default().fg(CMD_DIM) } else if is_cursor { Style::default().fg(Color::White).add_modifier(Modifier::DIM) } else { Style::default().fg(Color::DarkGray) };
         spans.push(Span::styled(format!(" {}", branch), branch_style));
     }
     if let Some(changes) = &entry.changes
@@ -702,7 +696,6 @@ mod tests {
         assert!(text.contains("feat/whatever"), "branch missing: {text}");
         assert!(text.contains("+20"), "add missing: {text}");
         assert!(text.contains("-40"), "del missing: {text}");
-        // branch should be hidden if None, changes also
         let mut e2 = make_entry(EntryType::Dir, 0);
         e2.label = "project7".to_string();
         e2.branch = None;
@@ -710,17 +703,5 @@ mod tests {
         let line2 = crate::renderer::entry(&e2, 0, false, false);
         let text2: String = line2.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(!text2.contains("feat"), "unexpected branch: {text2}");
-    }
-
-    #[test]
-    fn entry_branch_hidden_when_master_filtered() {
-        // Simulate builder filtering: branch None for master/main
-        let mut e = make_entry(EntryType::Dir, 0);
-        e.label = "proj".to_string();
-        e.branch = None; // builder would have filtered master to None
-        let line = crate::renderer::entry(&e, 0, false, false);
-        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(!text.contains("master"));
-        assert!(!text.contains("main"));
     }
 }

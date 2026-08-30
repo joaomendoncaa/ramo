@@ -50,7 +50,15 @@ impl TreeBuilder {
 
         let mut dir_entries: Vec<DirEntry> = Vec::with_capacity(dirs.len());
         for (d, git) in dirs.iter().zip(git_data.iter()) {
-            dir_entries.push(build_dir_entry(d, git, &sessions, &panes, &pane_sessions));
+            let branch = self
+                .git_cache
+                .branch(&d.path)
+                .filter(|b| b != "master" && b != "main")
+                .filter(|_| {
+                    let active = open.contains(&d.path);
+                    !(active && config.hide_hints_branches_active || !active && config.hide_hints_branches_inactive)
+                });
+            dir_entries.push(build_dir_entry(d, git, branch, &sessions, &panes, &pane_sessions));
         }
         for s in tmux::list_external_sessions(&sessions, &covered_paths, &covered_names) {
             dir_entries.push(external_dir_entry(&s, &panes));
@@ -90,28 +98,7 @@ impl TreeBuilder {
             } else {
                 self.git_cache.diff(&dir.path)
             };
-            let raw_branch = self.git_cache.branch(&dir.path);
-            let branch = match raw_branch {
-                Some(b) if b == "master" || b == "main" => None,
-                Some(b) => {
-                    let is_active = open.contains(&dir.path);
-                    if (is_active && config.hide_hints_branches_active)
-                        || (!is_active && config.hide_hints_branches_inactive)
-                    {
-                        None
-                    } else {
-                        Some(b)
-                    }
-                }
-                None => None,
-            };
-            // refresh worktree diffs already done via worktree_diffs; ensure worktree entries present
-            out.push(DirGit {
-                worktrees,
-                worktree_diffs,
-                main_diff,
-                branch,
-            });
+            out.push(DirGit { worktrees, worktree_diffs, main_diff });
         }
         out
     }
@@ -160,12 +147,12 @@ struct DirGit {
     worktrees: Vec<WorktreeInfo>,
     worktree_diffs: HashMap<PathBuf, Changes>,
     main_diff: Changes,
-    branch: Option<String>,
 }
 
 fn build_dir_entry(
     dir: &DirInfo,
     git: &DirGit,
+    branch: Option<String>,
     sessions: &[TmuxSession],
     panes: &[TmuxPane],
     pane_sessions: &[PaneSession],
@@ -207,7 +194,7 @@ fn build_dir_entry(
         path: dir.path.clone(),
         is_open: dir_is_open(dir, sessions, panes),
         changes,
-        branch: git.branch.clone(),
+        branch,
         worktrees,
         worktree_diffs,
         sessions: sessions_here,
@@ -272,10 +259,7 @@ fn worktree_sessions(
 
 fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
     let dir_idx = rows.len();
-    let search_text = match &entry.branch {
-        Some(b) => format!("{} {}", entry.name, b),
-        None => entry.name.clone(),
-    };
+    let search_text = entry.branch.as_ref().map(|b| format!("{} {b}", entry.name)).unwrap_or_else(|| entry.name.clone());
     rows.push(finalize_entry(Entry {
         kind: EntryType::Dir,
         label: entry.name.clone(),

@@ -94,62 +94,33 @@ impl GitCache {
         if !path.join(".git").exists() {
             return None;
         }
-        if let Some(out) = self.git_stdout(path, &["branch", "--show-current"]) {
-            let b = out.trim();
-            if !b.is_empty() {
-                return Some(b.to_string());
-            }
-        }
-        if let Some(out) = self.git_stdout(path, &["rev-parse", "--abbrev-ref", "HEAD"]) {
-            let b = out.trim();
-            if !b.is_empty() && b != "HEAD" {
-                return Some(b.to_string());
-            }
-        }
-        None
+        let out = self.git_stdout(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let b = out.trim();
+        if b.is_empty() || b == "HEAD" { None } else { Some(b.to_string()) }
     }
 
-    pub fn diff(&self, path: &Path) -> Changes {
-        if let Ok(c) = self.diffs.lock() {
-            if let Some((v, t)) = c.get(path) {
-                if t.elapsed().as_millis() < CACHE_TTL_MS {
-                    return v.clone();
-                }
-            }
-        }
-        let v = self.compute_changes(path);
-        if let Ok(mut c) = self.diffs.lock() {
-            c.insert(path.to_path_buf(), (v.clone(), Instant::now()));
-        }
-        v
-    }
-    pub fn worktrees(&self, path: &Path) -> Vec<WorktreeInfo> {
-        if let Ok(c) = self.worktrees.lock() {
-            if let Some((v, t)) = c.get(path) {
-                if t.elapsed().as_millis() < WORKTREE_CACHE_TTL_MS {
-                    return v.clone();
-                }
-            }
-        }
-        let v = self.list_worktrees(path);
-        if let Ok(mut c) = self.worktrees.lock() {
-            c.insert(path.to_path_buf(), (v.clone(), Instant::now()));
-        }
-        v
-    }
-
-    pub fn branch(&self, path: &Path) -> Option<String> {
-        if let Ok(c) = self.branches.lock()
+    fn cached<T: Clone>(&self, lock: &Mutex<HashMap<PathBuf, (T, Instant)>>, path: &Path, ttl: u128, f: impl FnOnce() -> T) -> T {
+        if let Ok(c) = lock.lock()
             && let Some((v, t)) = c.get(path)
-            && t.elapsed().as_millis() < CACHE_TTL_MS
+            && t.elapsed().as_millis() < ttl
         {
             return v.clone();
         }
-        let v = self.compute_branch(path);
-        if let Ok(mut c) = self.branches.lock() {
+        let v = f();
+        if let Ok(mut c) = lock.lock() {
             c.insert(path.to_path_buf(), (v.clone(), Instant::now()));
         }
         v
+    }
+
+    pub fn diff(&self, path: &Path) -> Changes {
+        self.cached(&self.diffs, path, CACHE_TTL_MS, || self.compute_changes(path))
+    }
+    pub fn worktrees(&self, path: &Path) -> Vec<WorktreeInfo> {
+        self.cached(&self.worktrees, path, WORKTREE_CACHE_TTL_MS, || self.list_worktrees(path))
+    }
+    pub fn branch(&self, path: &Path) -> Option<String> {
+        self.cached(&self.branches, path, CACHE_TTL_MS, || self.compute_branch(path))
     }
 
     pub fn load_disk(&self, cache: &DiskCache) {
