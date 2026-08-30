@@ -60,7 +60,7 @@ fn tmux_lines(args: &[&str]) -> Vec<String> {
 pub fn opencode_panes(panes: &[TmuxPane]) -> Vec<&TmuxPane> {
     panes
         .iter()
-        .filter(|p| p.current_command == "opencode")
+        .filter(|p| p.current_command.starts_with("opencode"))
         .collect()
 }
 
