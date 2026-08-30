@@ -177,12 +177,32 @@ pub fn render(frame: &mut Frame, picker: &mut Picker) {
                             c.action == *_action
                                 && c.contains(picker.last_mouse_col, picker.last_mouse_row)
                         });
-                        let style = if is_hovered {
-                            Style::default().bg(HOVER_BG).fg(HOVER_FG)
+                        let (key, desc) = text.split_at(1.min(text.len()));
+                        if is_hovered {
+                            line.spans.push(Span::styled(
+                                key,
+                                Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD),
+                            ));
+                            line.spans.push(Span::styled(
+                                desc,
+                                Style::default().bg(HOVER_BG).fg(HOVER_FG),
+                            ));
                         } else {
-                            Style::default().bg(Color::Reset)
-                        };
-                        line.spans.push(Span::styled(text.as_str(), style));
+                            line.spans.push(Span::styled(
+                                key,
+                                Style::default()
+                                    .fg(Color::Reset)
+                                    .bg(Color::Reset)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            line.spans.push(Span::styled(
+                                desc,
+                                Style::default()
+                                    .fg(Color::Reset)
+                                    .bg(Color::Reset)
+                                    .add_modifier(Modifier::DIM),
+                            ));
+                        }
                         if bi < buttons.len() - 1 {
                             line.spans
                                 .push(Span::styled(" ", Style::default().bg(Color::Reset)));
@@ -280,15 +300,11 @@ pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Li
     let effective_dim = dimmed && !is_cursor;
     let marker_fg = if effective_dim {
         CMD_DIM
+    } else if is_cursor && entry.kind == EntryType::Dir && entry.is_open {
+        Color::White
     } else {
         match entry.kind {
-            EntryType::Dir => {
-                if entry.is_open {
-                    Color::Yellow
-                } else {
-                    Color::Reset
-                }
-            }
+            EntryType::Dir => Color::Reset,
             EntryType::Worktree => Color::Cyan,
             EntryType::Agent => {
                 if entry.is_running {
@@ -299,7 +315,7 @@ pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Li
             }
         }
     };
-    let marker_style = if entry.kind == EntryType::Dir && entry.is_open && !effective_dim {
+    let marker_style = if entry.kind == EntryType::Dir && entry.is_open && !effective_dim && !is_cursor {
         Style::default().fg(marker_fg).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(marker_fg)
@@ -374,9 +390,9 @@ pub fn help_input(picker: &Picker) -> Line<'_> {
         if let Some(k) = &picker.help_edit_key {
             let prefix = format!("▸ {k} = ");
             let prompt_style = Style::default()
-                .fg(Color::Cyan)
+                .bg(Color::Reset)
                 .add_modifier(Modifier::BOLD);
-            let cursor_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+            let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
             let input = &picker.input;
             let pos = picker.input_cursor;
             let mut spans = vec![Span::styled(prefix, prompt_style)];
@@ -398,9 +414,9 @@ pub fn help_input(picker: &Picker) -> Line<'_> {
     }
     if picker.mode == Mode::Help {
         let prompt_style = Style::default()
-            .fg(Color::Cyan)
+            .bg(Color::Reset)
             .add_modifier(Modifier::BOLD);
-        let cursor_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+        let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
         let input = &picker.input;
         let pos = picker.input_cursor;
         let mut spans = vec![Span::styled("▸ ", prompt_style)];
@@ -426,13 +442,13 @@ pub fn input_line(picker: &Picker) -> Line<'_> {
         dim_style.add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(Color::Cyan)
+            .bg(Color::Reset)
             .add_modifier(Modifier::BOLD)
     };
     let cursor_style = if dim {
         dim_style
     } else {
-        Style::default().bg(Color::Cyan).fg(Color::Black)
+        Style::default().bg(Color::White).fg(Color::Black)
     };
     let input = &picker.input;
     let pos = picker.input_cursor;
@@ -512,10 +528,10 @@ fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
 }
 
 fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
-    let hk = Style::default().bg(HOVER_BG).fg(HOVER_FG);
+    let hk = Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD);
     let hd = Style::default().bg(HOVER_BG).fg(HOVER_FG);
-    let sk = Style::default().add_modifier(Modifier::DIM);
-    let sd = Style::default().add_modifier(Modifier::DIM);
+    let sk = Style::default().bg(Color::Reset).add_modifier(Modifier::BOLD);
+    let sd = Style::default().bg(Color::Reset).add_modifier(Modifier::DIM);
     match picker.mode {
         Mode::Help | Mode::HelpEditing => {
             let exit_hovered = hovered_action == Some(Action::ExitHelp);
