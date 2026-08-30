@@ -19,6 +19,14 @@ pub enum Signal {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Command,
+    Help,
+    HelpEditing,
+}
+
 pub struct Picker {
     pub(crate) entries: Vec<Entry>,
     pub(crate) filtered: Vec<usize>,
@@ -36,7 +44,7 @@ pub struct Picker {
     pub(crate) scroll: usize,
     pub(crate) mouse_hover: bool,
     pub(crate) auto_close: bool,
-    pub(crate) command_mode: bool,
+    pub(crate) mode: Mode,
     pub(crate) reveal_open: bool,
     pub(crate) config: Config,
     pub(crate) feedbacks: Vec<FeedbackEntry>,
@@ -44,6 +52,15 @@ pub struct Picker {
     pub(crate) clickables: Vec<Clickable>,
     pub(crate) last_mouse_col: u16,
     pub(crate) last_mouse_row: u16,
+    pub(crate) help_cursor: usize,
+    pub(crate) help_scroll: usize,
+    pub(crate) help_edit_buffer: String,
+    pub(crate) help_edit_cursor: usize,
+    pub(crate) help_edit_key: Option<String>,
+    pub(crate) stashed_input: String,
+    pub(crate) stashed_cursor: usize,
+    pub(crate) help_stashed_filter: String,
+    pub(crate) help_stashed_filter_cursor: usize,
 }
 
 impl Picker {
@@ -70,7 +87,7 @@ impl Picker {
             slot_entries: Rect::default(),
             scroll: 0,
             mouse_hover: false,
-            command_mode: false,
+            mode: Mode::Normal,
             clickables: Vec::new(),
             last_mouse_col: 0,
             last_mouse_row: 0,
@@ -79,6 +96,15 @@ impl Picker {
             config: payload.config,
             feedbacks: payload.feedbacks,
             entries_found,
+            help_cursor: 0,
+            help_scroll: 0,
+            help_edit_buffer: String::new(),
+            help_edit_cursor: 0,
+            help_edit_key: None,
+            stashed_input: String::new(),
+            stashed_cursor: 0,
+            help_stashed_filter: String::new(),
+            help_stashed_filter_cursor: 0,
         };
         picker.filtered = picker.filtered();
         picker.cursor = picker.find_initial_cursor();
@@ -168,8 +194,19 @@ impl Picker {
         rows
     }
 
+    pub fn is_command_mode(&self) -> bool {
+        self.mode == Mode::Command
+    }
+    pub fn is_help(&self) -> bool {
+        self.mode == Mode::Help || self.mode == Mode::HelpEditing
+    }
+    #[allow(dead_code)]
+    pub fn is_help_editing(&self) -> bool {
+        self.mode == Mode::HelpEditing
+    }
+
     pub fn cursor_entry_buttons(&self) -> Vec<(String, Action)> {
-        if !self.command_mode {
+        if !self.is_command_mode() {
             return vec![];
         }
         let Some(&idx) = self.filtered.get(self.cursor) else {
@@ -198,7 +235,7 @@ impl Picker {
                     let sanitized = goto.session.replace([':', '.'], "_");
                     tmux::kill_session(&sanitized);
                 }
-                self.command_mode = false;
+                self.mode = Mode::Normal;
                 self.schedule_refresh();
             }
         }
@@ -217,10 +254,284 @@ impl Picker {
                     self.entries[i].is_open = true;
                     cur = self.entries[i].parent;
                 }
-                self.command_mode = false;
+                self.mode = Mode::Normal;
                 self.schedule_refresh();
             }
         }
+    }
+
+    pub fn enter_help(&mut self) {
+        if self.is_help() {
+            return;
+        }
+        self.stashed_input = self.input.clone();
+        self.stashed_cursor = self.input_cursor;
+        self.input.clear();
+        self.input_cursor = 0;
+        self.help_cursor = 0;
+        self.help_scroll = 0;
+        self.help_stashed_filter.clear();
+        self.help_stashed_filter_cursor = 0;
+        self.mode = Mode::Help;
+        self.mouse_hover = false;
+    }
+
+    pub fn exit_help(&mut self) {
+        if !self.is_help() {
+            return;
+        }
+        self.mode = Mode::Normal;
+        self.help_edit_key = None;
+        self.help_edit_buffer.clear();
+        self.help_edit_cursor = 0;
+        self.input = self.stashed_input.clone();
+        self.input_cursor = self.stashed_cursor;
+        self.help_stashed_filter.clear();
+        self.help_stashed_filter_cursor = 0;
+        self.mouse_hover = false;
+    }
+
+    pub fn start_help_edit(&mut self) {
+        if self.mode != Mode::Help {
+            return;
+        }
+        let filtered = self.help_filtered_line_indices();
+        if filtered.is_empty() {
+            return;
+        }
+        let line_idx = filtered[self.help_cursor.min(filtered.len() - 1)];
+        let lines = crate::help::template_lines();
+        if let Some(k) = crate::help::key_at(&lines, line_idx) {
+            let raw = crate::help::raw_file_map();
+            let v = raw
+                .get(&k)
+                .cloned()
+                .unwrap_or_else(|| self.config.value_string(&k).unwrap_or_default());
+            // stash current filter
+            self.help_stashed_filter = self.input.clone();
+            self.help_stashed_filter_cursor = self.input_cursor;
+            self.help_edit_key = Some(k);
+            self.help_edit_buffer = v;
+            self.help_edit_cursor = self.help_edit_buffer.len();
+            self.input = self.help_edit_buffer.clone();
+            self.input_cursor = self.help_edit_cursor;
+            self.mode = Mode::HelpEditing;
+        }
+    }
+
+    pub fn cancel_help_edit(&mut self) {
+        if self.mode != Mode::HelpEditing {
+            return;
+        }
+        self.help_edit_key = None;
+        self.help_edit_buffer.clear();
+        self.help_edit_cursor = 0;
+        self.input = self.help_stashed_filter.clone();
+        self.input_cursor = self.help_stashed_filter_cursor;
+        self.help_stashed_filter.clear();
+        self.help_stashed_filter_cursor = 0;
+        self.mode = Mode::Help;
+        self.help_clamp_cursor();
+    }
+
+    pub fn commit_help_edit(&mut self) {
+        if self.mode != Mode::HelpEditing {
+            return;
+        }
+        let Some(key) = self.help_edit_key.clone() else {
+            self.cancel_help_edit();
+            return;
+        };
+        // input holds the buffer while editing
+        let new_value = self.input.clone();
+        self.help_edit_buffer = new_value.clone();
+        self.help_edit_cursor = self.input_cursor;
+
+        // surgical write to disk
+        let res = crate::help::commit_to_disk(&key, &new_value);
+        if let Err(msg) = res {
+            self.feedbacks.push(crate::model::FeedbackEntry {
+                level: crate::model::FeedbackType::Error,
+                message: msg,
+            });
+        } else {
+            // optimistic re-parse for immediate feedback
+            if let Some(path) = crate::config::Config::config_path().or(Some(
+                crate::config::Config::write_target(),
+            )) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let (cfg, fbs) = crate::config::Config::parse_content(&path, &content);
+                    self.config = cfg;
+                    self.feedbacks = fbs;
+                } else {
+                    // if write_target was new file, parse that
+                    let dummy_path = std::path::Path::new("config");
+                    let (cfg, fbs) =
+                        crate::config::Config::parse_content(dummy_path, &format!("{key} = {new_value}"));
+                    self.config = cfg;
+                    self.feedbacks = fbs;
+                }
+            }
+            // also update help_edit_buffer / input stays? We'll clear edit and return to Help
+        }
+        self.help_edit_key = None;
+        self.help_edit_buffer.clear();
+        self.help_edit_cursor = 0;
+        self.input = self.help_stashed_filter.clone();
+        self.input_cursor = self.help_stashed_filter_cursor;
+        self.help_stashed_filter.clear();
+        self.help_stashed_filter_cursor = 0;
+        self.mode = Mode::Help;
+        self.help_clamp_cursor();
+    }
+
+    pub fn help_move_cursor(&mut self, amount: i32) {
+        let len = self.help_filtered_line_indices().len();
+        if len == 0 || amount == 0 {
+            return;
+        }
+        self.mouse_hover = false;
+        let len_i = len as i32;
+        let cur = self.help_cursor as i32;
+        let new_cur = (cur + amount).rem_euclid(len_i);
+        self.help_cursor = new_cur as usize;
+    }
+
+    pub fn help_rows(&self) -> Vec<Option<usize>> {
+        if self.help_is_filtered() {
+            let lines = crate::help::template_lines();
+            let blocks = crate::help::parse_blocks(&lines);
+            let filter = self.help_filter_str().trim().to_lowercase();
+            let words: Vec<String> = filter.split_whitespace().map(|s| s.to_string()).collect();
+            let mut rows = Vec::new();
+            let mut ord = 0;
+            for block in blocks {
+                let mut matching = Vec::new();
+                for &li in &block.entries {
+                    if let Some(k) = crate::help::key_at(&lines, li) {
+                        let kl = k.to_lowercase();
+                        if words.iter().all(|w| kl.contains(w)) {
+                            matching.push(li);
+                        }
+                    }
+                }
+                if matching.is_empty() {
+                    continue;
+                }
+                for _ in &block.header {
+                    rows.push(None);
+                }
+                for _ in matching {
+                    rows.push(Some(ord));
+                    ord += 1;
+                }
+            }
+            rows
+        } else {
+            let lines = crate::help::template_lines();
+            let idxs = crate::help::selectable_indices(&lines);
+            let mut map = vec![None; lines.len()];
+            for (ord, &li) in idxs.iter().enumerate() {
+                map[li] = Some(ord);
+            }
+            map.into_iter().collect()
+        }
+    }
+
+    pub fn help_cursor_line(&self) -> usize {
+        if self.help_is_filtered() {
+            let lines = crate::help::template_lines();
+            let blocks = crate::help::parse_blocks(&lines);
+            let filter = self.help_filter_str().trim().to_lowercase();
+            let words: Vec<String> = filter.split_whitespace().map(|s| s.to_string()).collect();
+            let mut visible_idx = 0;
+            let mut ord = 0;
+            for block in blocks {
+                let mut matching = Vec::new();
+                for &li in &block.entries {
+                    if let Some(k) = crate::help::key_at(&lines, li) {
+                        let kl = k.to_lowercase();
+                        if words.iter().all(|w| kl.contains(w)) {
+                            matching.push(li);
+                        }
+                    }
+                }
+                if matching.is_empty() {
+                    continue;
+                }
+                // headers
+                let header_len = block.header.len();
+                // check if cursor is in this block's matching
+                if ord <= self.help_cursor && self.help_cursor < ord + matching.len() {
+                    let offset_in_block = self.help_cursor - ord;
+                    return visible_idx + header_len + offset_in_block;
+                }
+                visible_idx += header_len + matching.len();
+                ord += matching.len();
+            }
+            0
+        } else {
+            self.help_current_filtered_line_idx().unwrap_or(0)
+        }
+    }
+
+    pub fn help_visible_lines(&self) -> Vec<String> {
+        if self.help_is_filtered() {
+            crate::help::filtered_visible_lines(self.help_filter_str(), &self.config)
+        } else {
+            crate::help::display_lines(&self.config)
+        }
+    }
+
+    pub fn help_filter_str(&self) -> &str {
+        if self.mode == Mode::HelpEditing {
+            &self.help_stashed_filter
+        } else {
+            &self.input
+        }
+    }
+
+    pub fn help_filtered_line_indices(&self) -> Vec<usize> {
+        let lines = crate::help::template_lines();
+        let idxs = crate::help::selectable_indices(&lines);
+        let filter = self.help_filter_str().trim().to_lowercase();
+        if filter.is_empty() {
+            return idxs;
+        }
+        let words: Vec<String> = filter.split_whitespace().map(|s| s.to_string()).collect();
+        idxs.into_iter()
+            .filter(|&li| {
+                if let Some(k) = crate::help::key_at(&lines, li) {
+                    let kl = k.to_lowercase();
+                    words.iter().all(|w| kl.contains(w))
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+
+    pub fn help_filtered_count(&self) -> usize {
+        self.help_filtered_line_indices().len()
+    }
+
+    pub fn help_current_filtered_line_idx(&self) -> Option<usize> {
+        let filtered = self.help_filtered_line_indices();
+        filtered.get(self.help_cursor).copied()
+    }
+
+    pub(crate) fn help_clamp_cursor(&mut self) {
+        let len = self.help_filtered_line_indices().len();
+        if len == 0 {
+            self.help_cursor = 0;
+            self.help_scroll = 0;
+        } else if self.help_cursor >= len {
+            self.help_cursor = len.saturating_sub(1);
+        }
+    }
+
+    pub fn help_is_filtered(&self) -> bool {
+        !self.help_filter_str().trim().is_empty()
     }
 }
 
@@ -272,7 +583,7 @@ mod tests {
             scroll: 0,
             mouse_hover: false,
             auto_close: true,
-            command_mode: false,
+            mode: Mode::Normal,
             reveal_open: false,
             config,
             feedbacks: vec![],
@@ -280,6 +591,15 @@ mod tests {
             clickables: vec![],
             last_mouse_col: 0,
             last_mouse_row: 0,
+            help_cursor: 0,
+            help_scroll: 0,
+            help_edit_buffer: String::new(),
+            help_edit_cursor: 0,
+            help_edit_key: None,
+            stashed_input: String::new(),
+            stashed_cursor: 0,
+            help_stashed_filter: String::new(),
+            help_stashed_filter_cursor: 0,
         }
     }
 
@@ -322,5 +642,157 @@ mod tests {
             0,
         );
         assert_eq!(row_marks(&picker.rows()), "eee");
+    }
+
+    #[test]
+    fn help_enter_exit_stashes_input() {
+        let mut p = picker_with(&[EntryType::Dir], 0);
+        p.input = "foo".to_string();
+        p.input_cursor = 3;
+        p.enter_help();
+        assert_eq!(p.mode, Mode::Help);
+        assert_eq!(p.input, "");
+        assert_eq!(p.stashed_input, "foo");
+        p.exit_help();
+        assert_eq!(p.mode, Mode::Normal);
+        assert_eq!(p.input, "foo");
+        assert_eq!(p.input_cursor, 3);
+    }
+
+    #[test]
+    fn help_move_wraps() {
+        let mut p = picker_with(&[EntryType::Dir], 0);
+        p.enter_help();
+        let count = crate::help::selectable_indices(&crate::help::template_lines()).len();
+        assert!(count > 0);
+        p.help_cursor = 0;
+        p.help_move_cursor(-1);
+        assert_eq!(p.help_cursor, count - 1);
+        p.help_move_cursor(1);
+        assert_eq!(p.help_cursor, 0);
+        p.help_move_cursor(5);
+        assert_eq!(p.help_cursor, 5 % count);
+    }
+
+    #[test]
+    fn help_start_edit_sets_buffer() {
+        let mut p = picker_with(&[EntryType::Dir], 0);
+        p.enter_help();
+        // help_cursor 0 should be first selectable key (likely path)
+        p.start_help_edit();
+        assert_eq!(p.mode, Mode::HelpEditing);
+        assert!(p.help_edit_key.is_some());
+        let key = p.help_edit_key.clone().unwrap();
+        let raw = crate::help::raw_file_map();
+        let expected = raw
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| p.config.value_string(&key).unwrap_or_default());
+        assert_eq!(p.input, expected);
+        p.cancel_help_edit();
+        assert_eq!(p.mode, Mode::Help);
+        assert!(p.help_edit_key.is_none());
+    }
+
+    #[test]
+    fn help_start_edit_shows_raw_invalid() {
+        use std::sync::{Mutex, OnceLock};
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("ramo_test_help_edit_raw_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".config/ramo")).unwrap();
+        let orig_home = std::env::var("HOME").ok();
+        let orig_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &tmp);
+            std::env::set_var("XDG_CONFIG_HOME", "");
+        }
+        let target = crate::config::Config::write_target();
+        std::fs::write(&target, "auto-close = trudwadawda\n").unwrap();
+        let mut p = picker_with(&[EntryType::Dir], 0);
+        // reload config from file to ensure picker.config is default but file has invalid
+        let (cfg, _) = crate::config::Config::load(&[]);
+        p.config = cfg;
+        p.enter_help();
+        // find auto-close index
+        let lines = crate::help::template_lines();
+        let idxs = crate::help::selectable_indices(&lines);
+        let auto_idx = idxs
+            .iter()
+            .position(|&li| crate::help::key_at(&lines, li).as_deref() == Some("auto-close"))
+            .unwrap();
+        p.help_cursor = auto_idx;
+        p.start_help_edit();
+        assert_eq!(p.help_edit_key.as_deref(), Some("auto-close"));
+        assert_eq!(p.input, "trudwadawda");
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            if let Some(v) = orig_home {
+                std::env::set_var("HOME", v);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(v) = orig_xdg {
+                std::env::set_var("XDG_CONFIG_HOME", v);
+            } else {
+                std::env::remove_var("XDG_CONFIG_HOME");
+            }
+        }
+        drop(lock);
+    }
+
+    #[test]
+    fn help_filter_fuzzy_search() {
+        let mut p = picker_with(&[EntryType::Dir], 0);
+        p.enter_help();
+        assert!(!p.help_is_filtered());
+        assert_eq!(p.help_filtered_count(), crate::help::selectable_indices(&crate::help::template_lines()).len());
+        // filter for "auto" should match auto-close only (maybe) + its header
+        p.input = "auto".to_string();
+        p.input_cursor = 4;
+        let filtered = p.help_filtered_line_indices();
+        assert!(filtered.len() >= 1);
+        let lines = crate::help::template_lines();
+        for &li in &filtered {
+            let k = crate::help::key_at(&lines, li).unwrap();
+            assert!(k.to_lowercase().contains("auto"));
+        }
+        // visible includes header for auto-close block
+        let visible = p.help_visible_lines();
+        assert!(visible.len() >= filtered.len());
+        assert!(visible.iter().any(|l| l.contains("auto-close")));
+        // header should be present for auto-close
+        assert!(visible.iter().any(|l| l.contains("defines if the picker")));
+        // hide-changes has no header
+        p.input = "hide-changes-inactive".to_string();
+        let visible2 = p.help_visible_lines();
+        assert!(visible2.iter().any(|l| l.contains("hide-changes-inactive")));
+        assert!(!visible2.iter().any(|l| l.trim().starts_with('#')));
+        // check that unknown filter yields 0
+        p.input = "nonexistentkey123".to_string();
+        assert_eq!(p.help_filtered_count(), 0);
+        assert!(p.help_visible_lines().is_empty());
+        p.input.clear();
+        assert!(!p.help_is_filtered());
+    }
+
+    #[test]
+    fn help_filter_typing_resets_cursor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let mut p = picker_with(&[EntryType::Dir], 0);
+        p.enter_help();
+        p.help_cursor = 5;
+        // simulate typing 'a' in help
+        let key = KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+        p.handle_input(key);
+        assert_eq!(p.input, "a");
+        assert_eq!(p.help_cursor, 0);
+        assert_eq!(p.help_scroll, 0);
     }
 }

@@ -4,12 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+fn default_bind_help() -> char {
+    '?'
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub path: String,
     pub path_worktrees: String,
     pub bind_jumpto: String,
     pub bind_command_mode: char,
+    #[serde(default = "default_bind_help")]
+    pub bind_help: char,
     pub bind_command_session_kill: String,
     pub bind_command_worktree_new: String,
     pub bind_command_worktree_delete: String,
@@ -43,6 +49,7 @@ impl Default for Config {
             path_worktrees: String::new(),
             bind_jumpto: "enter".to_string(),
             bind_command_mode: ':',
+            bind_help: '?',
             bind_command_session_kill: "k".to_string(),
             bind_command_worktree_new: "n".to_string(),
             bind_command_worktree_delete: "d".to_string(),
@@ -94,6 +101,72 @@ impl Config {
     pub fn config_dir() -> Option<PathBuf> {
         let dir = Self::config_base().join("ramo");
         dir.is_dir().then_some(dir)
+    }
+
+    pub fn candidate_paths() -> Vec<PathBuf> {
+        let base = Self::config_base().join("ramo");
+        ["config", "config.ramo"]
+            .into_iter()
+            .map(|n| base.join(n))
+            .collect()
+    }
+
+    pub fn write_target() -> PathBuf {
+        if let Some(p) = Self::config_path() {
+            return p;
+        }
+        // No file yet — first candidate wins (mkdir on write)
+        Self::candidate_paths()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Self::config_base().join("ramo/config"))
+    }
+
+    pub fn value_string(&self, key: &str) -> Option<String> {
+        match key {
+            "path" => Some(self.path.clone()),
+            "path-worktrees" => Some(self.path_worktrees.clone()),
+            "bind-jumpto" => Some(self.bind_jumpto.clone()),
+            "bind-command-mode" => Some(self.bind_command_mode.to_string()),
+            "bind-help" => Some(self.bind_help.to_string()),
+            "bind-command-session-kill" => Some(self.bind_command_session_kill.clone()),
+            "bind-command-worktree-new" => Some(self.bind_command_worktree_new.clone()),
+            "bind-command-worktree-delete" => Some(self.bind_command_worktree_delete.clone()),
+            "auto-close" => Some(self.auto_close.to_string()),
+            "daemon-timeout" => Some(self.daemon_timeout.to_string()),
+            "hide-changes-inactive" => Some(self.hide_changes_inactive.to_string()),
+            "hide-changes-active" => Some(self.hide_changes_active.to_string()),
+            "hide-changes-worktree" => Some(self.hide_changes_worktree.to_string()),
+            "hide-hints-footer" => Some(self.hide_hints_footer.to_string()),
+            "hide-hints-branches-active" => Some(self.hide_hints_branches_active.to_string()),
+            "hide-hints-branches-inactive" => Some(self.hide_hints_branches_inactive.to_string()),
+            "hide-hints-remotes-active" => Some(self.hide_hints_remotes_active.to_string()),
+            "hide-hints-remotes-inactive" => Some(self.hide_hints_remotes_inactive.to_string()),
+            "style-icon-daemon-loading" => Some(self.style_icon_daemon_loading.clone()),
+            "style-icon-daemon-ready" => Some(self.style_icon_daemon_ready.clone()),
+            "style-icon-active" => Some(self.style_icon_active.clone()),
+            "style-icon-worktree" => Some(self.style_icon_worktree.clone()),
+            "style-icon-agent-idle" => Some(self.style_icon_agent_idle.clone()),
+            "style-icon-agent-running" => Some(self.style_icon_agent_running.clone()),
+            "style-icon-input" => Some(self.style_icon_input.clone()),
+            "style-entries-gap" => Some(self.style_entries_gap.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn is_default_value(key: &str, new_value: &str) -> bool {
+        let def = Config::default();
+        let Some(def_val) = def.value_string(key) else {
+            return false;
+        };
+        let new_trim = new_value.trim();
+        // For path keys, compare after tilde expansion so "~/Projects/*" matches default
+        if key == "path" || key == "path-worktrees" {
+            return util::expand_tilde(new_trim) == util::expand_tilde(&def_val);
+        }
+        // For bool and u64, also consider semantic equality via parsing
+        // but keep string equality as fallback for simplicity
+        def_val == new_trim
     }
 
     pub fn new() -> (Self, Vec<FeedbackEntry>) {
@@ -235,6 +308,19 @@ impl Config {
             "bind-command-mode" => match parse_char(key, value) {
                 Ok(c) => {
                     self.bind_command_mode = c;
+                    true
+                }
+                Err(msg) => {
+                    feedbacks.push(FeedbackEntry {
+                        level: FeedbackType::Error,
+                        message: msg,
+                    });
+                    true
+                }
+            },
+            "bind-help" => match parse_char(key, value) {
+                Ok(c) => {
+                    self.bind_help = c;
                     true
                 }
                 Err(msg) => {
@@ -449,6 +535,10 @@ impl Config {
             }
             "bind-command-mode" => {
                 self.bind_command_mode = default.bind_command_mode;
+                true
+            }
+            "bind-help" => {
+                self.bind_help = default.bind_help;
                 true
             }
             "bind-command-session-kill" => {

@@ -27,6 +27,8 @@
 # You can obviously delete all these comments when you feel confortable with the config,
 # but I'd leave them for reference later on.
 #
+# You can open and edit this file in-app with `? Help`.
+#
 # ██████╗ ███████╗███████╗ █████╗ ██╗   ██╗██╗  ████████╗
 # ██╔══██╗██╔════╝██╔════╝██╔══██╗██║   ██║██║  ╚══██╔══╝
 # ██║  ██║█████╗  █████╗  ███████║██║   ██║██║     ██║
@@ -52,6 +54,8 @@ path-worktrees = ~/Projects/worktrees
 # if something doesn't seem right
 bind-jumpto = enter
 bind-command-mode = :
+bind-help = ?
+
 # uses `kill-session` in tmux, so it doesn't delete
 # your worktree or agent session
 bind-command-session-kill = k

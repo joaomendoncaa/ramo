@@ -1,6 +1,6 @@
 use crate::clickable::{Action, Clickable, HOVER_BG, HOVER_FG};
 use crate::model::{Entry, EntryType, FeedbackEntry, FeedbackType, LINE_VERT};
-use crate::picker::Picker;
+use crate::picker::{Mode, Picker};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -25,6 +25,10 @@ pub struct Renderer {}
 
 impl Renderer {
     pub fn render(frame: &mut Frame, picker: &mut Picker) {
+        if picker.is_help() {
+            Self::render_help(frame, picker);
+            return;
+        }
         // style-entries-gap also pads the input row, above and below. These
         // are dedicated layout slots, kept outside the entries area so
         // scrolling, hit-testing and the row map stay entry-only.
@@ -133,7 +137,7 @@ impl Renderer {
 
         let entries = &picker.entries;
         let filtered = &picker.filtered;
-        let cmd = picker.command_mode;
+        let cmd = picker.mode == Mode::Command;
         let mut lines: Vec<Line> = Vec::with_capacity(slot_entries_height);
 
         for _ in 0..slot_entries_height.saturating_sub(total) {
@@ -191,6 +195,115 @@ impl Renderer {
             frame.render_widget(Paragraph::new(""), slots[input_idx + 1]);
         }
         frame.render_widget(Paragraph::new(Self::input(picker)), slot_input);
+        let mut idx = after_input_idx;
+        if !picker.config.hide_hints_footer {
+            let hovered_action = picker
+                .clickables
+                .iter()
+                .find(|c| c.contains(picker.last_mouse_col, picker.last_mouse_row))
+                .map(|c| c.action);
+            frame.render_widget(
+                Paragraph::new(Self::hints_line(picker, hovered_action)),
+                slots[idx],
+            );
+            idx += 1;
+        }
+        for fb in &picker.feedbacks {
+            frame.render_widget(Paragraph::new(Self::feedback(fb)), slots[idx]);
+            idx += 1;
+        }
+    }
+
+    fn render_help(frame: &mut Frame, picker: &mut Picker) {
+        let gap = picker.config.style_entries_gap.min(u64::from(u16::MAX)) as u16;
+        let mut constraints = vec![Constraint::Min(1)];
+        if gap > 0 {
+            constraints.push(Constraint::Length(gap));
+        }
+        constraints.push(Constraint::Length(1));
+        if gap > 0 {
+            constraints.push(Constraint::Length(gap));
+        }
+        if !picker.config.hide_hints_footer {
+            constraints.push(Constraint::Length(1));
+        }
+        for _ in 0..picker.feedbacks.len() {
+            constraints.push(Constraint::Length(1));
+        }
+        let slots = Layout::vertical(constraints).split(frame.area());
+        let slot_entries = slots[0];
+        let slot_entries_height = slot_entries.height as usize;
+        let input_idx = if gap > 0 { 2 } else { 1 };
+        let after_input_idx = input_idx + 1 + usize::from(gap > 0);
+        let slot_input = slots[input_idx];
+        picker.slot_entries = slot_entries;
+
+        let display_lines = picker.help_visible_lines();
+        let total = display_lines.len();
+        let cursor_line = picker.help_cursor_line();
+        // viewport scroll
+        let scroll = if picker.mouse_hover {
+            picker.help_scroll
+        } else {
+            let s = if total <= slot_entries_height {
+                0
+            } else if cursor_line < picker.help_scroll {
+                cursor_line
+            } else if cursor_line >= picker.help_scroll + slot_entries_height {
+                // keep cursor visible at bottom
+                cursor_line + 1 - slot_entries_height
+            } else {
+                picker.help_scroll
+            };
+            let s = s.min(total.saturating_sub(slot_entries_height));
+            picker.help_scroll = s;
+            s
+        };
+
+        // Build visible lines
+        let mut lines: Vec<Line> = Vec::with_capacity(slot_entries_height);
+        let padding = slot_entries_height.saturating_sub(total);
+        for _ in 0..padding {
+            lines.push(Line::raw(""));
+        }
+        let rows = picker.help_rows();
+        for idx in scroll..(scroll + slot_entries_height).min(total) {
+            if lines.len() >= slot_entries_height {
+                break;
+            }
+            let raw = &display_lines[idx];
+            let is_cursor = idx == cursor_line;
+            let is_selectable = rows[idx].is_some();
+            let style = if is_cursor {
+                Style::default().bg(CURSOR_BG).fg(Color::White)
+            } else if !is_selectable {
+                // comments / blanks dimmed
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
+            let span = Span::styled(raw.as_str(), style);
+            let line = Line::from(vec![span]);
+            lines.push(line);
+        }
+        // fill remaining if any
+        while lines.len() < slot_entries_height {
+            lines.push(Line::raw(""));
+        }
+
+        picker.clickables.clear();
+        if !picker.config.hide_hints_footer {
+            Self::build_hints_clickables(picker, slots[after_input_idx]);
+        }
+        // Also build clickables for each visible selectable line? For simplicity, handle via mouse hit test in events, not clickables
+
+        frame.render_widget(Paragraph::new(lines), slot_entries);
+        if gap > 0 {
+            frame.render_widget(Paragraph::new(""), slots[1]);
+            frame.render_widget(Paragraph::new(""), slots[input_idx + 1]);
+        }
+        // Input: in HelpEditing show "▸ key = <buffer>" with cursor, else empty filtered input hidden? Use help_input
+        frame.render_widget(Paragraph::new(Self::help_input(picker)), slot_input);
         let mut idx = after_input_idx;
         if !picker.config.hide_hints_footer {
             let hovered_action = picker
@@ -314,8 +427,61 @@ impl Renderer {
         frame.render_widget(paragraph, Rect::new(area.x, y, width, 1));
     }
 
+    pub fn help_input(picker: &Picker) -> Line<'_> {
+        // In HelpEditing, input is the edit buffer for the selected key.
+        // Show "▸ key = <buffer>" with cursor inside buffer part.
+        if picker.mode == Mode::HelpEditing {
+            if let Some(k) = &picker.help_edit_key {
+                let prefix = format!("▸ {k} = ");
+                let prompt_style = Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD);
+                let cursor_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+                let input = &picker.input;
+                let pos = picker.input_cursor;
+                let mut spans = vec![Span::styled(prefix, prompt_style)];
+                if input.is_empty() {
+                    spans.push(Span::styled(" ", cursor_style));
+                } else if pos == input.len() {
+                    spans.push(Span::raw(input.as_str()));
+                    spans.push(Span::styled(" ", cursor_style));
+                } else {
+                    let before = &input[..pos];
+                    let at = &input[pos..=pos];
+                    let after = &input[pos + 1..];
+                    spans.push(Span::raw(before));
+                    spans.push(Span::styled(at, cursor_style));
+                    spans.push(Span::raw(after));
+                }
+                return Line::from(spans);
+            }
+        }
+        if picker.mode == Mode::Help {
+            // In Help show filter buffer (fuzzy search over config keys)
+            let prompt_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            let cursor_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+            let input = &picker.input;
+            let pos = picker.input_cursor;
+            let mut spans = vec![Span::styled("▸ ", prompt_style)];
+            if input.is_empty() {
+                spans.push(Span::styled(" ", cursor_style));
+            } else if pos == input.len() {
+                spans.push(Span::raw(input.as_str()));
+                spans.push(Span::styled(" ", cursor_style));
+            } else {
+                spans.push(Span::raw(&input[..pos]));
+                spans.push(Span::styled(&input[pos..=pos], cursor_style));
+                spans.push(Span::raw(&input[pos + 1..]));
+            }
+            return Line::from(spans);
+        }
+        Self::input(picker)
+    }
+
     pub fn input(picker: &Picker) -> Line<'_> {
-        let dim = picker.command_mode;
+        let dim = picker.mode == Mode::Command;
         let dim_style = Style::default().fg(CMD_DIM);
         let prompt_style = if dim {
             dim_style.add_modifier(Modifier::BOLD)
@@ -372,36 +538,45 @@ impl Renderer {
         let y = hints_slot.y;
         let mut x = hints_slot.x;
 
-        if picker.command_mode {
-            let skip = 1 + " Command Mode  ".len();
-            x += skip as u16;
-            let w = 3 + " Escape Command Mode".len();
-            picker.clickables.push(Clickable {
-                rect: Rect::new(x, y, w as u16, 1),
-                action: Action::ExitCommandMode,
-            });
-        } else {
-            let first_w = 1 + " Command Mode  ".len();
-            picker.clickables.push(Clickable {
-                rect: Rect::new(x, y, first_w as u16, 1),
-                action: Action::CommandMode,
-            });
-            x += first_w as u16;
-
-            let groups: [(u16, Action); 6] = [
-                (6 + 11, Action::MovePrevious),
-                (6 + 7, Action::MoveNext),
-                (6 + 7, Action::MoveDown),
-                (6 + 7, Action::MoveUp),
-                (6 + 14, Action::ResetInput),
-                (6 + 6, Action::Close),
-            ];
-            for (w, action) in groups {
+        match picker.mode {
+            Mode::Help | Mode::HelpEditing => {
+                // ESC Exit Help
+                let w = 3 + " Exit Help".len();
                 picker.clickables.push(Clickable {
-                    rect: Rect::new(x, y, w, 1),
-                    action,
+                    rect: Rect::new(x, y, w as u16, 1),
+                    action: Action::ExitHelp,
                 });
-                x += w;
+                // Note: Navigate and Edit hints are not clickables for now (could add but not needed)
+            }
+            Mode::Command => {
+                let skip = 1 + " Command Mode  ".len();
+                x += skip as u16;
+                let w = 3 + " Escape Command Mode".len();
+                picker.clickables.push(Clickable {
+                    rect: Rect::new(x, y, w as u16, 1),
+                    action: Action::ExitCommandMode,
+                });
+                x += w as u16;
+                // allow ? Help from command mode too
+                x += 2; // gap
+                let hw = 1 + 1 + " Help".len();
+                picker.clickables.push(Clickable {
+                    rect: Rect::new(x, y, hw as u16, 1),
+                    action: Action::HelpMode,
+                });
+            }
+            Mode::Normal => {
+                let first_w = 1 + " Command Mode  ".len();
+                picker.clickables.push(Clickable {
+                    rect: Rect::new(x, y, first_w as u16, 1),
+                    action: Action::CommandMode,
+                });
+                x += first_w as u16;
+                let hw = "? Help  ".len() as u16;
+                picker.clickables.push(Clickable {
+                    rect: Rect::new(x, y, hw, 1),
+                    action: Action::HelpMode,
+                });
             }
         }
     }
@@ -412,43 +587,56 @@ impl Renderer {
         let sk = Style::default().add_modifier(Modifier::DIM);
         let sd = Style::default().add_modifier(Modifier::DIM);
 
-        if picker.command_mode {
-            let exit_hovered = hovered_action == Some(Action::ExitCommandMode);
-            return Line::from(vec![
-                Span::styled(
-                    format!("{}", picker.config.bind_command_mode),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " Command Mode  ",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("ESC", if exit_hovered { hk } else { sk }),
-                Span::styled(" Escape Command Mode", if exit_hovered { hd } else { sd }),
-            ]);
+        match picker.mode {
+            Mode::Help | Mode::HelpEditing => {
+                let exit_hovered = hovered_action == Some(Action::ExitHelp);
+                return Line::from(vec![
+                    Span::styled("ESC", if exit_hovered { hk } else { sk }),
+                    Span::styled(" Exit Help  ", if exit_hovered { hd } else { sd }),
+                    Span::styled("↑↓", sk),
+                    Span::styled(" Navigate  ", sd),
+                    Span::styled("Enter", sk),
+                    Span::styled(" Edit", sd),
+                ]);
+            }
+            Mode::Command => {
+                let exit_hovered = hovered_action == Some(Action::ExitCommandMode);
+                let help_hovered = hovered_action == Some(Action::HelpMode);
+                return Line::from(vec![
+                    Span::styled(
+                        format!("{}", picker.config.bind_command_mode),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " Command Mode  ",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("ESC", if exit_hovered { hk } else { sk }),
+                    Span::styled(" Escape Command Mode  ", if exit_hovered { hd } else { sd }),
+                    Span::styled(
+                        format!("{}", picker.config.bind_help),
+                        if help_hovered { hk } else { sk },
+                    ),
+                    Span::styled(" Help", if help_hovered { hd } else { sd }),
+                ]);
+            }
+            Mode::Normal => {
+                let hovered_cmd = hovered_action == Some(Action::CommandMode);
+                let hovered_help = hovered_action == Some(Action::HelpMode);
+                return Line::from(vec![
+                    Span::styled(
+                        format!("{}", picker.config.bind_command_mode),
+                        if hovered_cmd { hk } else { sk },
+                    ),
+                    Span::styled(" Command Mode  ", if hovered_cmd { hd } else { sd }),
+                    Span::styled(
+                        format!("{}", picker.config.bind_help),
+                        if hovered_help { hk } else { sk },
+                    ),
+                    Span::styled(" Help", if hovered_help { hd } else { sd }),
+                ]);
+            }
         }
-
-        let hovered_cmd = hovered_action == Some(Action::CommandMode);
-        let hovered_previous = hovered_action == Some(Action::MovePrevious);
-        let hovered_next = hovered_action == Some(Action::MoveNext);
-        let hovered_reset_cursor = hovered_action == Some(Action::ResetInput);
-        let hovered_close = hovered_action == Some(Action::Close);
-
-        Line::from(vec![
-            Span::styled(
-                format!("{}", picker.config.bind_command_mode),
-                if hovered_cmd { hk } else { sk },
-            ),
-            Span::styled(" Command Mode  ", if hovered_cmd { hd } else { sd }),
-            Span::styled("CTRL P", if hovered_previous { hk } else { sk }),
-            Span::styled(" Previous  ", if hovered_previous { hd } else { sd }),
-            Span::styled("CTRL N", if hovered_next { hk } else { sk }),
-            Span::styled(" Next  ", if hovered_next { hd } else { sd }),
-            Span::styled("CTRL R", if hovered_reset_cursor { hk } else { sk }),
-            Span::styled(" Reset Cursor ", if hovered_reset_cursor { hd } else { sd }),
-            Span::styled("CTRL C", if hovered_close { hk } else { sk }),
-            Span::styled(" Close", if hovered_close { hd } else { sd }),
-        ])
     }
 
     pub fn feedback(feedback: &FeedbackEntry) -> Line<'_> {

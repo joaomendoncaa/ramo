@@ -1,12 +1,252 @@
 use crate::clickable::Action;
-use crate::picker::Picker;
+use crate::picker::{Mode, Picker};
 use crate::tmux;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 impl Picker {
     pub fn handle_input(&mut self, key: KeyEvent) {
-        if self.command_mode {
+        // HelpEditing has highest priority: editing buffer
+        if self.mode == Mode::HelpEditing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.cancel_help_edit();
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.commit_help_edit();
+                    return;
+                }
+                KeyCode::Left => {
+                    if self.input_cursor > 0 {
+                        self.input_cursor -= 1;
+                    }
+                    return;
+                }
+                KeyCode::Right => {
+                    if self.input_cursor < self.input.len() {
+                        self.input_cursor += 1;
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    if self.input_cursor > 0 {
+                        self.input_cursor -= 1;
+                        self.input.remove(self.input_cursor);
+                    }
+                    return;
+                }
+                KeyCode::Delete if self.input_cursor < self.input.len() => {
+                    self.input.remove(self.input_cursor);
+                    return;
+                }
+                KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                    self.input.insert(self.input_cursor, c);
+                    self.input_cursor += 1;
+                    return;
+                }
+                _ => {
+                    // allow ctrl-a/e/k/w etc for editing buffer
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key.code {
+                            KeyCode::Char('a') => self.input_cursor = 0,
+                            KeyCode::Char('e') => self.input_cursor = self.input.len(),
+                            KeyCode::Char('k') => {
+                                self.input.drain(self.input_cursor..);
+                            }
+                            KeyCode::Char('w') => {
+                                // delete word back in help edit buffer (no filter)
+                                let bytes = self.input.as_bytes();
+                                let mut i = self.input_cursor;
+                                while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                                    i -= 1;
+                                }
+                                while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+                                    i -= 1;
+                                }
+                                self.input.drain(i..self.input_cursor);
+                                self.input_cursor = i;
+                            }
+                            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {}
+                            _ => {}
+                        }
+                        return;
+                    }
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        match key.code {
+                            KeyCode::Char('b') => self.move_word(-1),
+                            KeyCode::Char('f') => self.move_word(1),
+                            _ => {}
+                        }
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+
+        if self.mode == Mode::Help {
+            // Ignore bind keys in Help ( : disabled, ? already in help)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && (key.code == KeyCode::Char(self.config.bind_command_mode)
+                    || key.code == KeyCode::Char(self.config.bind_help))
+            {
+                return;
+            }
+            // Navigation with Ctrl
+            if key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) {
+                match key.code {
+                    KeyCode::Char('p') => {
+                        self.help_move_cursor(-1);
+                        return;
+                    }
+                    KeyCode::Char('n') => {
+                        self.help_move_cursor(1);
+                        return;
+                    }
+                    KeyCode::Char('u') => {
+                        self.help_move_cursor(-5);
+                        return;
+                    }
+                    KeyCode::Char('d') => {
+                        self.help_move_cursor(5);
+                        return;
+                    }
+                    KeyCode::Char('a') => {
+                        self.input_cursor = 0;
+                        return;
+                    }
+                    KeyCode::Char('e') => {
+                        self.input_cursor = self.input.len();
+                        return;
+                    }
+                    KeyCode::Char('k') => {
+                        self.input.drain(self.input_cursor..);
+                        self.help_cursor = 0;
+                        self.help_scroll = 0;
+                        self.help_clamp_cursor();
+                        return;
+                    }
+                    KeyCode::Char('w') => {
+                        let bytes = self.input.as_bytes();
+                        let mut i = self.input_cursor;
+                        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                            i -= 1;
+                        }
+                        while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+                            i -= 1;
+                        }
+                        self.input.drain(i..self.input_cursor);
+                        self.input_cursor = i;
+                        self.help_cursor = 0;
+                        self.help_scroll = 0;
+                        self.help_clamp_cursor();
+                        return;
+                    }
+                    KeyCode::Char('r') => {
+                        self.input.clear();
+                        self.input_cursor = 0;
+                        self.help_cursor = 0;
+                        self.help_scroll = 0;
+                        return;
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('q') => {
+                        self.quit = true;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                match key.code {
+                    KeyCode::Char('b') => {
+                        self.move_word(-1);
+                        return;
+                    }
+                    KeyCode::Char('f') => {
+                        self.move_word(1);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            match key.code {
+                KeyCode::Up => {
+                    self.help_move_cursor(-1);
+                    return;
+                }
+                KeyCode::Down => {
+                    self.help_move_cursor(1);
+                    return;
+                }
+                KeyCode::Esc => {
+                    if !self.input.is_empty() {
+                        self.input.clear();
+                        self.input_cursor = 0;
+                        self.help_cursor = 0;
+                        self.help_scroll = 0;
+                        return;
+                    }
+                    self.exit_help();
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.start_help_edit();
+                    return;
+                }
+                KeyCode::Left => {
+                    if self.input_cursor > 0 {
+                        self.input_cursor -= 1;
+                    }
+                    return;
+                }
+                KeyCode::Right => {
+                    if self.input_cursor < self.input.len() {
+                        self.input_cursor += 1;
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    if self.input_cursor > 0 {
+                        self.input_cursor -= 1;
+                        self.input.remove(self.input_cursor);
+                        self.help_cursor = 0;
+                        self.help_scroll = 0;
+                        self.help_clamp_cursor();
+                    }
+                    return;
+                }
+                KeyCode::Delete if self.input_cursor < self.input.len() => {
+                    self.input.remove(self.input_cursor);
+                    self.help_cursor = 0;
+                    self.help_scroll = 0;
+                    self.help_clamp_cursor();
+                    return;
+                }
+                KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                    self.input.insert(self.input_cursor, c);
+                    self.input_cursor += 1;
+                    self.help_cursor = 0;
+                    self.help_scroll = 0;
+                    self.help_clamp_cursor();
+                    return;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.mode == Mode::Command {
+            // check for help bind even in command mode
+            if key.code == KeyCode::Char(self.config.bind_help)
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
+                self.mode = Mode::Normal; // exit command before entering help? spec says ? enabled inside command_mode
+                self.enter_help();
+                return;
+            }
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 match key.code {
                     KeyCode::Char('p') => {
@@ -42,10 +282,22 @@ impl Picker {
             return;
         }
 
+        // Normal mode
         self.mouse_hover = false;
 
-        if key.code == KeyCode::Char(self.config.bind_command_mode) && key.modifiers.is_empty() {
-            self.command_mode = true;
+        if key.code == KeyCode::Char(self.config.bind_help)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.enter_help();
+            return;
+        }
+
+        if key.code == KeyCode::Char(self.config.bind_command_mode)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.mode = Mode::Command;
             return;
         }
 
@@ -75,6 +327,13 @@ impl Picker {
                 if self.check_clickables(event.column, event.row) {
                     return;
                 }
+                if self.is_help() {
+                    if let Some(ord) = self.get_help_index_from_mouse(event.column, event.row) {
+                        self.help_cursor = ord;
+                        self.start_help_edit();
+                    }
+                    return;
+                }
                 if let Some(idx) = self.get_index_from_mouse(event.column, event.row) {
                     self.cursor = idx;
                     self.goto();
@@ -84,11 +343,21 @@ impl Picker {
                 if self.check_clickables(event.column, event.row) {
                     return;
                 }
+                if self.is_help() {
+                    return;
+                }
                 if self.get_index_from_mouse(event.column, event.row).is_some() {
-                    self.command_mode = true;
+                    self.mode = Mode::Command;
                 }
             }
             MouseEventKind::Moved => {
+                if self.is_help() {
+                    if let Some(ord) = self.get_help_index_from_mouse(event.column, event.row) {
+                        self.help_cursor = ord;
+                        self.mouse_hover = true;
+                    }
+                    return;
+                }
                 if let Some(idx) = self.get_index_from_mouse(event.column, event.row) {
                     self.cursor = idx;
                     self.mouse_hover = true;
@@ -96,11 +365,19 @@ impl Picker {
             }
             MouseEventKind::ScrollDown => {
                 self.mouse_hover = false;
-                self.scroll_view(1);
+                if self.is_help() {
+                    self.help_scroll_view(1);
+                } else {
+                    self.scroll_view(1);
+                }
             }
             MouseEventKind::ScrollUp => {
                 self.mouse_hover = false;
-                self.scroll_view(-1);
+                if self.is_help() {
+                    self.help_scroll_view(-1);
+                } else {
+                    self.scroll_view(-1);
+                }
             }
             _ => {}
         }
@@ -109,7 +386,7 @@ impl Picker {
     fn handle_command_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Backspace => {
-                self.command_mode = false;
+                self.mode = Mode::Normal;
             }
             KeyCode::Char('k') => {
                 self.execute_kill_session();
@@ -137,8 +414,10 @@ impl Picker {
 
     fn handle_click(&mut self, action: Action) {
         match action {
-            Action::CommandMode => self.command_mode = true,
-            Action::ExitCommandMode => self.command_mode = false,
+            Action::CommandMode => self.mode = Mode::Command,
+            Action::ExitCommandMode => self.mode = Mode::Normal,
+            Action::HelpMode => self.enter_help(),
+            Action::ExitHelp => self.exit_help(),
             Action::KillSession => self.execute_kill_session(),
             Action::OpenDetached => self.open_detached(),
             Action::MovePrevious => self.move_cursor(-1),
@@ -255,6 +534,24 @@ impl Picker {
             self.scroll = (self.scroll + step).min(max_row);
             let max = n.saturating_sub(1);
             self.cursor = (self.cursor + step).min(max);
+        }
+    }
+
+    fn help_scroll_view(&mut self, dir: i32) {
+        let total = self.help_rows().len();
+        if total == 0 {
+            return;
+        }
+        let max_scroll = total.saturating_sub(1);
+        if dir < 0 {
+            let step = (-dir) as usize;
+            self.help_scroll = self.help_scroll.saturating_sub(step);
+            self.help_move_cursor(-(step as i32));
+        }
+        if dir > 0 {
+            let step = dir as usize;
+            self.help_scroll = (self.help_scroll + step).min(max_scroll);
+            self.help_move_cursor(step as i32);
         }
     }
 
@@ -378,5 +675,32 @@ impl Picker {
             Some(Some(p)) => Some(*p),
             _ => None,
         }
+    }
+
+    pub(crate) fn get_help_index_from_mouse(&self, column: u16, row: u16) -> Option<usize> {
+        let area = self.slot_entries;
+        if column < area.x
+            || column >= area.x.saturating_add(area.width)
+            || row < area.y
+            || row >= area.y.saturating_add(area.height)
+        {
+            return None;
+        }
+        let vh = area.height as usize;
+        let total = self.help_rows().len();
+        if total == 0 {
+            return None;
+        }
+        let view_y = (row - area.y) as usize;
+        let padding = vh.saturating_sub(total);
+        if view_y < padding {
+            return None;
+        }
+        let line_idx = self.help_scroll + (view_y - padding);
+        if line_idx >= total {
+            return None;
+        }
+        let rows = self.help_rows();
+        rows.get(line_idx).copied().flatten()
     }
 }

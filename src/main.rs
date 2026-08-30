@@ -3,6 +3,7 @@ mod cli;
 mod clickable;
 mod config;
 mod daemon;
+mod help;
 mod events;
 mod filter;
 mod git;
