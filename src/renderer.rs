@@ -412,101 +412,50 @@ pub fn loader(frame: &mut Frame, area: Rect, spinner_frame: usize) {
     frame.render_widget(paragraph, Rect::new(area.x, y, width, 1));
 }
 
-pub fn help_input(picker: &Picker) -> Line<'_> {
-    if picker.mode == Mode::HelpEditing {
-        if let Some(k) = &picker.help_edit_key {
-            let prefix = format!("▸ {k} = ");
-            let prompt_style = Style::default()
-                .bg(Color::Reset)
-                .add_modifier(Modifier::BOLD);
-            let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
-            let input = &picker.input;
-            let pos = picker.input_cursor;
-            let mut spans = vec![Span::styled(prefix, prompt_style)];
-            if input.is_empty() {
-                spans.push(Span::styled(" ", cursor_style));
-            } else if pos == input.len() {
-                spans.push(Span::raw(input.as_str()));
-                spans.push(Span::styled(" ", cursor_style));
-            } else {
-                let before = &input[..pos];
-                let at = &input[pos..=pos];
-                let after = &input[pos + 1..];
-                spans.push(Span::raw(before));
-                spans.push(Span::styled(at, cursor_style));
-                spans.push(Span::raw(after));
-            }
-            return Line::from(spans);
-        }
-    }
-    if picker.mode == Mode::Help {
-        let prompt_style = Style::default()
-            .bg(Color::Reset)
-            .add_modifier(Modifier::BOLD);
-        let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
-        let input = &picker.input;
-        let pos = picker.input_cursor;
-        let mut spans = vec![Span::styled("▸ ", prompt_style)];
-        if input.is_empty() {
-            spans.push(Span::styled(" ", cursor_style));
-        } else if pos == input.len() {
-            spans.push(Span::raw(input.as_str()));
-            spans.push(Span::styled(" ", cursor_style));
-        } else {
-            spans.push(Span::raw(&input[..pos]));
-            spans.push(Span::styled(&input[pos..=pos], cursor_style));
-            spans.push(Span::raw(&input[pos + 1..]));
-        }
-        return Line::from(spans);
-    }
-    input_line(picker)
-}
-
-pub fn input_line(picker: &Picker) -> Line<'_> {
-    let dim = picker.mode == Mode::Command;
+fn cursor_line(prefix: String, input: &str, pos: usize, dim: bool) -> Line<'_> {
     let dim_style = Style::default().fg(CMD_DIM);
     let prompt_style = if dim {
         dim_style.add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .bg(Color::Reset)
-            .add_modifier(Modifier::BOLD)
+        Style::default().bg(Color::Reset).add_modifier(Modifier::BOLD)
     };
     let cursor_style = if dim {
         dim_style
     } else {
         Style::default().bg(Color::White).fg(Color::Black)
     };
-    let input = &picker.input;
-    let pos = picker.input_cursor;
-    let mut spans = vec![Span::styled("▸ ", prompt_style)];
+    let mut spans = vec![Span::styled(prefix, prompt_style)];
     if input.is_empty() {
         spans.push(Span::styled(" ", cursor_style));
     } else if pos == input.len() {
-        let text = if dim {
-            Span::styled(input.as_str(), dim_style)
-        } else {
-            Span::raw(input.as_str())
-        };
+        let text = if dim { Span::styled(input, dim_style) } else { Span::raw(input) };
         spans.push(text);
         spans.push(Span::styled(" ", cursor_style));
     } else {
-        let before = if dim {
-            Span::styled(&input[..pos], dim_style)
-        } else {
-            Span::raw(&input[..pos])
-        };
+        let before = if dim { Span::styled(&input[..pos], dim_style) } else { Span::raw(&input[..pos]) };
         let at = &input[pos..=pos];
-        let after = if dim {
-            Span::styled(&input[pos + 1..], dim_style)
-        } else {
-            Span::raw(&input[pos + 1..])
-        };
+        let after = if dim { Span::styled(&input[pos + 1..], dim_style) } else { Span::raw(&input[pos + 1..]) };
         spans.push(before);
         spans.push(Span::styled(at, cursor_style));
         spans.push(after);
     }
     Line::from(spans)
+}
+
+pub fn help_input(picker: &Picker) -> Line<'_> {
+    if picker.mode == Mode::HelpEditing {
+        if let Some(edit) = &picker.help_edit {
+            return cursor_line(format!("▸ {} = ", edit.key), &picker.input, picker.input_cursor, false);
+        }
+    }
+    if picker.mode == Mode::Help {
+        return cursor_line("▸ ".to_string(), &picker.input, picker.input_cursor, false);
+    }
+    input_line(picker)
+}
+
+pub fn input_line(picker: &Picker) -> Line<'_> {
+    cursor_line("▸ ".to_string(), &picker.input, picker.input_cursor, picker.mode == Mode::Command)
 }
 
 fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {

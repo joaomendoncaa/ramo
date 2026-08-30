@@ -6,7 +6,6 @@ pub enum Daemon {
     Start,
     Kill,
     Logs,
-    Stats,
     Install,
     Uninstall,
 }
@@ -44,7 +43,6 @@ impl Cli {
                             "start" => Command::Daemon(Daemon::Start),
                             "kill" => Command::Daemon(Daemon::Kill),
                             "logs" => Command::Daemon(Daemon::Logs),
-                            "stats" => Command::Daemon(Daemon::Stats),
                             "install" => Command::Daemon(Daemon::Install),
                             "uninstall" => Command::Daemon(Daemon::Uninstall),
                             _ => Command::Unknown(unknown_cmd(&args)),
@@ -92,7 +90,6 @@ ramo daemon         Print current daemon info\n\
 ramo daemon start   Start a daemon\n\
 ramo daemon kill    Kill running daemon\n\
 ramo daemon logs    Tail daemon logs\n\
-ramo daemon stats   Print daemon performance stats\n\
 ramo daemon install     Install systemd user service (daemon starts at login)\n\
 ramo daemon uninstall   Remove the systemd user service\n\
 \n\

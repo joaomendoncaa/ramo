@@ -3,13 +3,13 @@ use crate::picker::Picker;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+fn matches_entry(e: &crate::model::Entry, words: &[String]) -> bool {
+    words.iter().all(|w| e.search_text_lower.contains(w))
+}
+
 impl Picker {
     pub(crate) fn get_curated_input(&self) -> Vec<String> {
-        self.input
-            .to_lowercase()
-            .split_whitespace()
-            .map(String::from)
-            .collect()
+        self.input.to_lowercase().split_whitespace().map(String::from).collect()
     }
 
     // Compute the filtered view of `self.entries`. Matching an entry pulls
@@ -19,22 +19,17 @@ impl Picker {
         if words.is_empty() {
             return (0..self.entries.len()).collect();
         }
-
         let mut matched: HashSet<usize> = HashSet::new();
         for (i, e) in self.entries.iter().enumerate() {
-            if words.iter().all(|w| e.search_text_lower.contains(w)) {
+            if matches_entry(e, &words) {
                 let mut cur = Some(i);
                 while let Some(idx) = cur {
-                    if !matched.insert(idx) {
-                        break;
-                    }
+                    if !matched.insert(idx) { break; }
                     cur = self.entries[idx].parent;
                 }
             }
         }
-        (0..self.entries.len())
-            .filter(|i| matched.contains(i))
-            .collect()
+        (0..self.entries.len()).filter(|i| matched.contains(i)).collect()
     }
 
     // Rebuild the filtered view and place the cursor sensibly.
@@ -49,19 +44,14 @@ impl Picker {
             self.scroll = 0;
             return;
         }
-
         let words = self.get_curated_input();
         let best = (0..self.filtered.len())
-            .filter(|&p| {
-                let e = &self.entries[self.filtered[p]];
-                words.iter().all(|w| e.search_text_lower.contains(w))
-            })
+            .filter(|&p| matches_entry(&self.entries[self.filtered[p]], &words))
             .min_by_key(|&p| (self.entries[self.filtered[p]].depth, std::cmp::Reverse(p)));
         self.cursor = best.unwrap_or(self.filtered.len() - 1);
     }
 
     // On a fresh list, land on the entry nearest the current working dir.
-    // TODO WTF
     pub(crate) fn find_initial_cursor(&self) -> usize {
         let cwd = std::env::var("RAMO_CURRENT_PATH")
             .ok()

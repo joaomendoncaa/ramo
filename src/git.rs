@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const CACHE_TTL_MS: u128 = 5000;
 const WORKTREE_CACHE_TTL_MS: u128 = 30_000;
@@ -15,55 +15,14 @@ pub struct DiskCache {
     pub worktrees: Vec<(PathBuf, Vec<WorktreeInfo>)>,
 }
 
-struct TtlCache<T: Clone> {
-    map: Mutex<HashMap<PathBuf, (T, Instant)>>,
-    ttl_ms: u128,
-}
-
-impl<T: Clone> TtlCache<T> {
-    fn new(ttl_ms: u128) -> Self {
-        Self {
-            map: Mutex::new(HashMap::new()),
-            ttl_ms,
-        }
-    }
-    fn get_or_insert_with(&self, key: &Path, f: impl FnOnce() -> T) -> T {
-        if let Ok(cache) = self.map.lock()
-            && let Some((v, t)) = cache.get(key)
-            && t.elapsed().as_millis() < self.ttl_ms
-        {
-            return v.clone();
-        }
-        let v = f();
-        if let Ok(mut cache) = self.map.lock() {
-            cache.insert(key.to_path_buf(), (v.clone(), Instant::now()));
-        }
-        v
-    }
-    fn load(&self, items: &[(PathBuf, T)]) {
-        let stale = Instant::now() - std::time::Duration::from_millis((self.ttl_ms + 1) as u64);
-        if let Ok(mut m) = self.map.lock() {
-            for (k, v) in items {
-                m.insert(k.clone(), (v.clone(), stale));
-            }
-        }
-    }
-    fn dump(&self) -> Vec<(PathBuf, T)> {
-        self.map.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default()
-    }
-}
-
 pub struct GitCache {
-    diffs: TtlCache<Changes>,
-    worktrees: TtlCache<Vec<WorktreeInfo>>,
+    diffs: Mutex<HashMap<PathBuf, (Changes, Instant)>>,
+    worktrees: Mutex<HashMap<PathBuf, (Vec<WorktreeInfo>, Instant)>>,
 }
 
 impl GitCache {
     pub fn new() -> Self {
-        Self {
-            diffs: TtlCache::new(CACHE_TTL_MS),
-            worktrees: TtlCache::new(WORKTREE_CACHE_TTL_MS),
-        }
+        Self { diffs: Mutex::new(HashMap::new()), worktrees: Mutex::new(HashMap::new()) }
     }
 
     fn git_stdout(&self, path: &Path, args: &[&str]) -> Option<String> {
@@ -125,22 +84,52 @@ impl GitCache {
     }
 
     pub fn diff(&self, path: &Path) -> Changes {
-        self.diffs
-            .get_or_insert_with(path, || self.compute_changes(path))
+        if let Ok(c) = self.diffs.lock() {
+            if let Some((v, t)) = c.get(path) {
+                if t.elapsed().as_millis() < CACHE_TTL_MS {
+                    return v.clone();
+                }
+            }
+        }
+        let v = self.compute_changes(path);
+        if let Ok(mut c) = self.diffs.lock() {
+            c.insert(path.to_path_buf(), (v.clone(), Instant::now()));
+        }
+        v
     }
     pub fn worktrees(&self, path: &Path) -> Vec<WorktreeInfo> {
-        self.worktrees
-            .get_or_insert_with(path, || self.list_worktrees(path))
+        if let Ok(c) = self.worktrees.lock() {
+            if let Some((v, t)) = c.get(path) {
+                if t.elapsed().as_millis() < WORKTREE_CACHE_TTL_MS {
+                    return v.clone();
+                }
+            }
+        }
+        let v = self.list_worktrees(path);
+        if let Ok(mut c) = self.worktrees.lock() {
+            c.insert(path.to_path_buf(), (v.clone(), Instant::now()));
+        }
+        v
     }
 
     pub fn load_disk(&self, cache: &DiskCache) {
-        self.diffs.load(&cache.diffs);
-        self.worktrees.load(&cache.worktrees);
+        let stale = Instant::now() - Duration::from_millis((CACHE_TTL_MS + 1) as u64);
+        if let Ok(mut m) = self.diffs.lock() {
+            for (k, v) in &cache.diffs {
+                m.insert(k.clone(), (v.clone(), stale));
+            }
+        }
+        let stale2 = Instant::now() - Duration::from_millis((WORKTREE_CACHE_TTL_MS + 1) as u64);
+        if let Ok(mut m) = self.worktrees.lock() {
+            for (k, v) in &cache.worktrees {
+                m.insert(k.clone(), (v.clone(), stale2));
+            }
+        }
     }
     pub fn to_disk(&self) -> DiskCache {
         DiskCache {
-            diffs: self.diffs.dump(),
-            worktrees: self.worktrees.dump(),
+            diffs: self.diffs.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default(),
+            worktrees: self.worktrees.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default(),
         }
     }
 }

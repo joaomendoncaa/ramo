@@ -48,10 +48,6 @@ fn main() -> io::Result<()> {
             daemon::show_logs();
             return Ok(());
         }
-        Command::Daemon(Daemon::Stats) => {
-            eprintln!("ramo: daemon stats removed");
-            return Ok(());
-        }
         Command::Daemon(Daemon::Install) => {
             return service::install();
         }

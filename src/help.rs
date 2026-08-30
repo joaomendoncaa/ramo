@@ -48,6 +48,19 @@ fn inline_suffix(line: &str) -> Option<String> {
     Some(after_eq[hash_pos..].trim().to_string())
 }
 
+fn format_kv(k: &str, config: &Config, raw: &std::collections::HashMap<String, String>, tmpl: &str) -> String {
+    if let Some(rv) = raw.get(k) {
+        return format!("{k} = {rv}");
+    }
+    if let Some(v) = config.value_string(k) {
+        if let Some(suf) = inline_suffix(tmpl) {
+            return format!("{k} = {v} {suf}");
+        }
+        return format!("{k} = {v}");
+    }
+    tmpl.to_string()
+}
+
 pub fn raw_map_from_content(content: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for line in content.lines() {
@@ -76,11 +89,7 @@ pub fn raw_file_map() -> std::collections::HashMap<String, String> {
     raw_map_from_content(&content)
 }
 
-pub fn is_default_value(key: &str, new_value: &str) -> bool {
-    Config::is_default_value(key, new_value)
-}
-
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn display_line(line: &str, config: &Config) -> String {
     if let Some(k) = key_at_line(line) {
         if let Some(v) = config.value_string(&k) {
@@ -91,30 +100,8 @@ pub fn display_line(line: &str, config: &Config) -> String {
 }
 
 pub fn display_lines(config: &Config) -> Vec<String> {
-    // Prefer raw file value for display so invalid entries show exactly as written
     let raw = raw_file_map();
-    template_lines()
-        .iter()
-        .map(|l| {
-            if let Some(k) = key_at_line(l) {
-                if let Some(rv) = raw.get(&k) {
-                    return format!("{k} = {rv}");
-                }
-                if let Some(v) = config.value_string(&k) {
-                    if let Some(suf) = inline_suffix(l) {
-                        return format!("{k} = {v} {suf}");
-                    }
-                    return format!("{k} = {v}");
-                }
-            }
-            l.clone()
-        })
-        .collect()
-}
-
-#[allow(dead_code)]
-pub fn selectable_count() -> usize {
-    selectable_indices(&template_lines()).len()
+    template_lines().iter().map(|l| if let Some(k) = key_at_line(l) { format_kv(&k, config, &raw, l) } else { l.clone() }).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -195,20 +182,7 @@ pub fn filtered_visible_lines(filter: &str, config: &Config) -> Vec<String> {
             out.push(h.clone());
         }
         for (li, k) in matching_entries {
-            if let Some(rv) = raw.get(&k) {
-                out.push(format!("{k} = {rv}"));
-            } else if let Some(v) = config.value_string(&k) {
-                // preserve inline suffix from template line if present
-                let tmpl_line = &lines[li];
-                if let Some(suf) = inline_suffix(tmpl_line) {
-                    out.push(format!("{k} = {v} {suf}"));
-                } else {
-                    out.push(format!("{k} = {v}"));
-                }
-            } else {
-                // fallback to template line
-                out.push(lines[li].clone());
-            }
+            out.push(format_kv(&k, config, &raw, &lines[li]));
         }
     }
     out
@@ -329,7 +303,7 @@ fn write_atomic(target: &std::path::Path, content: &str) -> Result<(), String> {
 pub fn commit_to_disk(key: &str, new_value: &str) -> Result<(), String> {
     let target = Config::write_target();
     let existing = std::fs::read_to_string(&target).ok();
-    if is_default_value(key, new_value) {
+    if Config::is_default_value(key, new_value) {
         let Some(new_content) = surgical_delete(existing.as_deref(), key) else {
             if target.exists() { let _ = std::fs::remove_file(&target); }
             return Ok(());
@@ -409,13 +383,13 @@ mod tests {
     #[test]
     fn is_default_value_checks() {
         // auto-close default is true
-        assert!(is_default_value("auto-close", "true"));
-        assert!(!is_default_value("auto-close", "false"));
-        assert!(!is_default_value("auto-close", "trudwadawda"));
-        assert!(is_default_value("hide-hints-footer", "false"));
+        assert!(Config::is_default_value("auto-close", "true"));
+        assert!(!Config::is_default_value("auto-close", "false"));
+        assert!(!Config::is_default_value("auto-close", "trudwadawda"));
+        assert!(Config::is_default_value("hide-hints-footer", "false"));
         // path default is $HOME/Projects/*, but we test empty worktrees default ""
-        assert!(is_default_value("path-worktrees", ""));
-        assert!(!is_default_value("path-worktrees", "~/other"));
+        assert!(Config::is_default_value("path-worktrees", ""));
+        assert!(!Config::is_default_value("path-worktrees", "~/other"));
     }
 
     #[test]

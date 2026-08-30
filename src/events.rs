@@ -414,14 +414,6 @@ impl Picker {
             self.open_detached();
             return;
         }
-        if Config::key_matches(&self.config.bind_command_worktree_new, key) {
-            // TODO: worktree new not yet implemented, placeholder
-            return;
-        }
-        if Config::key_matches(&self.config.bind_command_worktree_delete, key) {
-            // TODO: worktree delete not yet implemented
-            return;
-        }
     }
 
     fn check_clickables(&mut self, col: u16, row: u16) -> bool {

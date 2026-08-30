@@ -27,6 +27,13 @@ pub enum Mode {
     HelpEditing,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct HelpEdit {
+    pub key: String,
+    pub saved_filter: String,
+    pub saved_cursor: usize,
+}
+
 pub struct Picker {
     pub(crate) entries: Vec<Entry>,
     pub(crate) filtered: Vec<usize>,
@@ -53,13 +60,9 @@ pub struct Picker {
     pub(crate) last_mouse_row: u16,
     pub(crate) help_cursor: usize,
     pub(crate) help_scroll: usize,
-    pub(crate) help_edit_buffer: String,
-    pub(crate) help_edit_cursor: usize,
-    pub(crate) help_edit_key: Option<String>,
     pub(crate) stashed_input: String,
     pub(crate) stashed_cursor: usize,
-    pub(crate) help_stashed_filter: String,
-    pub(crate) help_stashed_filter_cursor: usize,
+    pub(crate) help_edit: Option<HelpEdit>,
 }
 
 impl Picker {
@@ -96,13 +99,9 @@ impl Picker {
             entries_found,
             help_cursor: 0,
             help_scroll: 0,
-            help_edit_buffer: String::new(),
-            help_edit_cursor: 0,
-            help_edit_key: None,
             stashed_input: String::new(),
             stashed_cursor: 0,
-            help_stashed_filter: String::new(),
-            help_stashed_filter_cursor: 0,
+            help_edit: None,
         };
         picker.filtered = picker.filtered();
         picker.cursor = picker.find_initial_cursor();
@@ -274,8 +273,7 @@ impl Picker {
         self.input_cursor = 0;
         self.help_cursor = 0;
         self.help_scroll = 0;
-        self.help_stashed_filter.clear();
-        self.help_stashed_filter_cursor = 0;
+        self.help_edit = None;
         self.mode = Mode::Help;
         self.mouse_hover = false;
     }
@@ -285,13 +283,9 @@ impl Picker {
             return;
         }
         self.mode = Mode::Normal;
-        self.help_edit_key = None;
-        self.help_edit_buffer.clear();
-        self.help_edit_cursor = 0;
+        self.help_edit = None;
         self.input = self.stashed_input.clone();
         self.input_cursor = self.stashed_cursor;
-        self.help_stashed_filter.clear();
-        self.help_stashed_filter_cursor = 0;
         self.mouse_hover = false;
         self.filter();
     }
@@ -312,16 +306,12 @@ impl Picker {
                 .get(&k)
                 .cloned()
                 .unwrap_or_else(|| self.config.value_string(&k).unwrap_or_default());
-            // strip inline comment for editing (e.g. `k # comment` -> `k`)
             let v = raw_v.split('#').next().unwrap_or(&raw_v).trim().to_string();
-            // stash current filter
-            self.help_stashed_filter = self.input.clone();
-            self.help_stashed_filter_cursor = self.input_cursor;
-            self.help_edit_key = Some(k);
-            self.help_edit_buffer = v;
-            self.help_edit_cursor = self.help_edit_buffer.len();
-            self.input = self.help_edit_buffer.clone();
-            self.input_cursor = self.help_edit_cursor;
+            let saved_filter = self.input.clone();
+            let saved_cursor = self.input_cursor;
+            self.help_edit = Some(HelpEdit { key: k, saved_filter, saved_cursor });
+            self.input = v;
+            self.input_cursor = self.input.len();
             self.mode = Mode::HelpEditing;
         }
     }
@@ -330,13 +320,10 @@ impl Picker {
         if self.mode != Mode::HelpEditing {
             return;
         }
-        self.help_edit_key = None;
-        self.help_edit_buffer.clear();
-        self.help_edit_cursor = 0;
-        self.input = self.help_stashed_filter.clone();
-        self.input_cursor = self.help_stashed_filter_cursor;
-        self.help_stashed_filter.clear();
-        self.help_stashed_filter_cursor = 0;
+        if let Some(edit) = self.help_edit.take() {
+            self.input = edit.saved_filter;
+            self.input_cursor = edit.saved_cursor;
+        }
         self.mode = Mode::Help;
         self.help_clamp_cursor();
     }
@@ -345,51 +332,34 @@ impl Picker {
         if self.mode != Mode::HelpEditing {
             return;
         }
-        let Some(key) = self.help_edit_key.clone() else {
+        let Some(edit) = self.help_edit.clone() else {
             self.cancel_help_edit();
             return;
         };
-        // input holds the buffer while editing
+        let key = edit.key.clone();
         let new_value = self.input.clone();
-        self.help_edit_buffer = new_value.clone();
-        self.help_edit_cursor = self.input_cursor;
-
-        // surgical write to disk
         let res = crate::help::commit_to_disk(&key, &new_value);
         if let Err(msg) = res {
             self.feedbacks.push(crate::model::FeedbackEntry {
                 level: crate::model::FeedbackType::Error,
                 message: msg,
             });
-        } else {
-            // optimistic re-parse for immediate feedback
-            if let Some(path) =
-                crate::config::Config::config_path().or(Some(crate::config::Config::write_target()))
-            {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let (cfg, fbs) = crate::config::Config::parse_content(&path, &content);
-                    self.config = cfg;
-                    self.feedbacks = fbs;
-                } else {
-                    // if write_target was new file, parse that
-                    let dummy_path = std::path::Path::new("config");
-                    let (cfg, fbs) = crate::config::Config::parse_content(
-                        dummy_path,
-                        &format!("{key} = {new_value}"),
-                    );
-                    self.config = cfg;
-                    self.feedbacks = fbs;
-                }
+        } else if let Some(path) = crate::config::Config::config_path().or(Some(crate::config::Config::write_target())) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let (cfg, fbs) = crate::config::Config::parse_content(&path, &content);
+                self.config = cfg;
+                self.feedbacks = fbs;
+            } else {
+                let dummy_path = std::path::Path::new("config");
+                let (cfg, fbs) = crate::config::Config::parse_content(dummy_path, &format!("{key} = {new_value}"));
+                self.config = cfg;
+                self.feedbacks = fbs;
             }
-            // also update help_edit_buffer / input stays? We'll clear edit and return to Help
         }
-        self.help_edit_key = None;
-        self.help_edit_buffer.clear();
-        self.help_edit_cursor = 0;
-        self.input = self.help_stashed_filter.clone();
-        self.input_cursor = self.help_stashed_filter_cursor;
-        self.help_stashed_filter.clear();
-        self.help_stashed_filter_cursor = 0;
+        if let Some(edit) = self.help_edit.take() {
+            self.input = edit.saved_filter;
+            self.input_cursor = edit.saved_cursor;
+        }
         self.mode = Mode::Help;
         self.help_clamp_cursor();
     }
@@ -463,8 +433,8 @@ impl Picker {
     }
 
     pub fn help_filter_str(&self) -> &str {
-        if self.mode == Mode::HelpEditing {
-            &self.help_stashed_filter
+        if let Some(edit) = &self.help_edit {
+            &edit.saved_filter
         } else {
             &self.input
         }
@@ -488,11 +458,6 @@ impl Picker {
                 }
             })
             .collect()
-    }
-
-    #[allow(dead_code)]
-    pub fn help_filtered_count(&self) -> usize {
-        self.help_filtered_line_indices().len()
     }
 
     pub(crate) fn help_clamp_cursor(&mut self) {
@@ -567,13 +532,9 @@ mod tests {
             last_mouse_row: 0,
             help_cursor: 0,
             help_scroll: 0,
-            help_edit_buffer: String::new(),
-            help_edit_cursor: 0,
-            help_edit_key: None,
             stashed_input: String::new(),
             stashed_cursor: 0,
-            help_stashed_filter: String::new(),
-            help_stashed_filter_cursor: 0,
+            help_edit: None,
         }
     }
 
@@ -652,8 +613,8 @@ mod tests {
         // help_cursor 0 should be first selectable key (likely path)
         p.start_help_edit();
         assert_eq!(p.mode, Mode::HelpEditing);
-        assert!(p.help_edit_key.is_some());
-        let key = p.help_edit_key.clone().unwrap();
+        assert!(p.help_edit.is_some());
+        let key = p.help_edit.as_ref().unwrap().key.clone();
         let raw = crate::help::raw_file_map();
         let expected = raw
             .get(&key)
@@ -662,7 +623,7 @@ mod tests {
         assert_eq!(p.input, expected);
         p.cancel_help_edit();
         assert_eq!(p.mode, Mode::Help);
-        assert!(p.help_edit_key.is_none());
+        assert!(p.help_edit.is_none());
     }
 
     #[test]
@@ -696,7 +657,7 @@ mod tests {
             .unwrap();
         p.help_cursor = auto_idx;
         p.start_help_edit();
-        assert_eq!(p.help_edit_key.as_deref(), Some("auto-close"));
+        assert_eq!(p.help_edit.as_ref().map(|e| e.key.as_str()), Some("auto-close"));
         assert_eq!(p.input, "trudwadawda");
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {
@@ -720,7 +681,7 @@ mod tests {
         p.enter_help();
         assert!(!p.help_is_filtered());
         assert_eq!(
-            p.help_filtered_count(),
+            p.help_filtered_line_indices().len(),
             crate::help::selectable_indices(&crate::help::template_lines()).len()
         );
         // filter for "auto" should match auto-close only (maybe) + its header
@@ -746,7 +707,7 @@ mod tests {
         assert!(!visible2.iter().any(|l| l.trim().starts_with('#')));
         // check that unknown filter yields 0
         p.input = "nonexistentkey123".to_string();
-        assert_eq!(p.help_filtered_count(), 0);
+        assert_eq!(p.help_filtered_line_indices().len(), 0);
         assert!(p.help_visible_lines().is_empty());
         p.input.clear();
         assert!(!p.help_is_filtered());
