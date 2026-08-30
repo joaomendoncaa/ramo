@@ -1,53 +1,40 @@
 use crate::builder::TreeBuilder;
 use crate::config::Config;
 use crate::logs;
-use crate::metrics::BuildTimings;
 use crate::model::{Entry, FeedbackEntry, FeedbackType, Payload};
 use crate::service;
 use serde::{Deserialize, Serialize};
 
-pub struct Daemon {
-    config: Config,
+pub fn preflight(config: &Config, feedbacks: Vec<FeedbackEntry>) -> Payload {
+    Payload {
+        entries: Vec::new(),
+        config: config.clone(),
+        feedbacks,
+        entries_found: 0,
+    }
 }
 
-impl Daemon {
-    pub fn new(config: &Config) -> Self {
-        Daemon {
-            config: config.clone(),
-        }
+pub fn kill() {
+    if service::is_installed() {
+        let _ = service::stop();
     }
+    let pid_path = pid_path();
+    let sock_path = sock_path();
 
-    pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
-        start(overrides)
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        let _ = Command::new("kill")
+            .arg(pid.to_string())
+            .stderr(Stdio::null())
+            .status();
     }
+    let _ = std::fs::remove_file(&sock_path);
+    let _ = std::fs::remove_file(&pid_path);
+}
 
-    pub fn kill() {
-        if service::is_installed() {
-            let _ = service::stop();
-        }
-        let pid_path = pid_path();
-        let sock_path = sock_path();
-
-        if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
-            && let Ok(pid) = pid_str.trim().parse::<i32>()
-        {
-            let _ = Command::new("kill")
-                .arg(pid.to_string())
-                .stderr(Stdio::null())
-                .status();
-        }
-        let _ = std::fs::remove_file(&sock_path);
-        let _ = std::fs::remove_file(&pid_path);
-    }
-
-    pub fn preflight(&self, feedbacks: Vec<FeedbackEntry>) -> Payload {
-        Payload {
-            entries: Vec::new(),
-            config: self.config.clone(),
-            feedbacks,
-            entries_found: 0,
-        }
-    }
+pub fn start_daemon(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
+    start(overrides)
 }
 
 use log::{error, info, warn};
@@ -234,46 +221,33 @@ fn build_payload(
     config_lock: &ConfigLock,
     feedback_lock: &FeedbackLock,
     builder: &TreeBuilder,
-) -> (Vec<u8>, usize, BuildTimings) {
+) -> (Vec<u8>, usize) {
     let config = config_lock.read().unwrap();
     let feedbacks = feedback_lock.read().unwrap();
-    let (entries, mut timings) = builder.build(&config);
+    let entries = builder.build(&config);
     let entry_count = entries.len();
-    let t = Instant::now();
     let bytes = serialize_payload(entries, &config, &feedbacks, entry_count);
-    timings.serialize_ms = t.elapsed().as_millis();
-    (bytes, entry_count, timings)
+    (bytes, entry_count)
 }
 
 fn broadcast(data: &PayloadBytes, clients: &ClientList) -> bool {
     let bytes = data.read().unwrap().clone();
     let mut list = clients.lock().unwrap();
-    let mut i = 0;
     let mut sent = false;
-    while i < list.len() {
-        if write_frame(&mut list[i], &bytes).is_ok() {
+    list.retain_mut(|c| {
+        if write_frame(c, &bytes).is_ok() {
             sent = true;
-            i += 1;
+            true
         } else {
-            list.swap_remove(i);
+            false
         }
-    }
+    });
     sent
 }
 
-// Prunes dead client sockets and reports whether any clients remain. Needed
-// because identical payloads are never written, so dead peers would otherwise
-// linger in the client list forever.
 fn prune_dead(clients: &ClientList) -> bool {
     let mut list = clients.lock().unwrap();
-    let mut i = 0;
-    while i < list.len() {
-        if is_dead(&mut list[i]) {
-            list.swap_remove(i);
-        } else {
-            i += 1;
-        }
-    }
+    list.retain_mut(|c| !is_dead(c));
     !list.is_empty()
 }
 
@@ -394,8 +368,7 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                             if let Ok(mut f) = fb_lock.write() {
                                 *f = fb;
                             }
-                            let (bytes, _count, _timings) =
-                                build_payload(&lock, &fb_lock, &builder);
+                            let (bytes, _count) = build_payload(&lock, &fb_lock, &builder);
                             if let Ok(mut d) = data.write() {
                                 *d = bytes;
                             }
@@ -443,8 +416,7 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     *guard = false;
                 }
                 let start = Instant::now();
-                let (bytes, _count, _timings) =
-                    build_payload(&config_lock, &feedback_lock, &builder);
+                let (bytes, _count) = build_payload(&config_lock, &feedback_lock, &builder);
                 let changed = {
                     let mut d = data.write().unwrap();
                     if *d == bytes {
@@ -641,7 +613,7 @@ where
             return Some(b);
         }
     } else {
-        Daemon::kill();
+        kill();
     }
 
     let (config, _) = Config::load(overrides);

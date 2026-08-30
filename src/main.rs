@@ -8,7 +8,6 @@ mod filter;
 mod git;
 mod help;
 mod logs;
-mod metrics;
 mod model;
 mod opencode;
 mod picker;
@@ -35,10 +34,10 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         Command::Daemon(Daemon::Start) => {
-            return daemon::Daemon::start(cli.overrides);
+            return daemon::start_daemon(cli.overrides);
         }
         Command::Daemon(Daemon::Kill) | Command::Kill => {
-            daemon::Daemon::kill();
+            daemon::kill();
             return Ok(());
         }
         Command::Daemon(Daemon::Info) => {
@@ -50,7 +49,7 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         Command::Daemon(Daemon::Stats) => {
-            metrics::print_stats();
+            eprintln!("ramo: daemon stats removed");
             return Ok(());
         }
         Command::Daemon(Daemon::Install) => {
@@ -75,10 +74,9 @@ fn main() -> io::Result<()> {
 
     feedbacks.extend(config.apply_overrides(&cli.overrides));
 
-    let daemon = daemon::Daemon::new(&config);
     let payload = daemon::fetch_once()
         .and_then(|bytes| serde_json::from_slice::<model::Payload>(&bytes).ok())
-        .unwrap_or_else(|| daemon.preflight(feedbacks));
+        .unwrap_or_else(|| daemon::preflight(&config, feedbacks));
 
     let mut screen = Tui::new()?;
     let mut picker = Picker::new(payload);

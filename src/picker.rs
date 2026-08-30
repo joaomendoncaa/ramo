@@ -445,40 +445,10 @@ impl Picker {
     }
 
     pub fn help_cursor_line(&self) -> usize {
-        if self.help_is_filtered() {
-            let lines = crate::help::template_lines();
-            let blocks = crate::help::parse_blocks(&lines);
-            let filter = self.help_filter_str().trim().to_lowercase();
-            let words: Vec<String> = filter.split_whitespace().map(|s| s.to_string()).collect();
-            let mut visible_idx = 0;
-            let mut ord = 0;
-            for block in blocks {
-                let mut matching = Vec::new();
-                for &li in &block.entries {
-                    if let Some(k) = crate::help::key_at(&lines, li) {
-                        let kl = k.to_lowercase();
-                        if words.iter().all(|w| kl.contains(w)) {
-                            matching.push(li);
-                        }
-                    }
-                }
-                if matching.is_empty() {
-                    continue;
-                }
-                // headers
-                let header_len = block.header.len();
-                // check if cursor is in this block's matching
-                if ord <= self.help_cursor && self.help_cursor < ord + matching.len() {
-                    let offset_in_block = self.help_cursor - ord;
-                    return visible_idx + header_len + offset_in_block;
-                }
-                visible_idx += header_len + matching.len();
-                ord += matching.len();
-            }
-            0
-        } else {
-            self.help_current_filtered_line_idx().unwrap_or(0)
-        }
+        self.help_rows()
+            .iter()
+            .position(|r| *r == Some(self.help_cursor))
+            .unwrap_or(0)
     }
 
     pub fn help_visible_lines(&self) -> Vec<String> {
@@ -520,11 +490,6 @@ impl Picker {
     #[allow(dead_code)]
     pub fn help_filtered_count(&self) -> usize {
         self.help_filtered_line_indices().len()
-    }
-
-    pub fn help_current_filtered_line_idx(&self) -> Option<usize> {
-        let filtered = self.help_filtered_line_indices();
-        filtered.get(self.help_cursor).copied()
     }
 
     pub(crate) fn help_clamp_cursor(&mut self) {

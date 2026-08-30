@@ -41,15 +41,12 @@ impl Drop for Tui {
     }
 }
 
-impl std::ops::Deref for Tui {
-    type Target = Term;
-    fn deref(&self) -> &Term {
-        &self.term
-    }
-}
-
-impl std::ops::DerefMut for Tui {
-    fn deref_mut(&mut self) -> &mut Term {
-        &mut self.term
+impl Tui {
+    pub fn draw<F>(&mut self, f: F) -> io::Result<()>
+    where
+        F: FnOnce(&mut ratatui::Frame),
+    {
+        self.term.draw(f)?;
+        Ok(())
     }
 }

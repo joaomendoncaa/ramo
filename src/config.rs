@@ -284,347 +284,65 @@ impl Config {
 
     fn set_field(&mut self, key: &str, value: &str, feedbacks: &mut Vec<FeedbackEntry>) -> bool {
         match key {
-            "path" => match parse_path(key, value) {
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-                Ok(()) => {
-                    self.path = value.to_string();
-                    true
-                }
-            },
-            "path-worktrees" => {
-                self.path_worktrees = value.to_string();
-                true
-            }
-            "bind-jumpto" => {
-                self.bind_jumpto = value.to_string();
-                true
-            }
-            "bind-command-mode" => match parse_char(key, value) {
-                Ok(c) => {
-                    self.bind_command_mode = c;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "bind-help" => match parse_char(key, value) {
-                Ok(c) => {
-                    self.bind_help = c;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "bind-command-session-kill" => {
-                self.bind_command_session_kill = value.to_string();
-                true
-            }
-            "bind-command-worktree-new" => {
-                self.bind_command_worktree_new = value.to_string();
-                true
-            }
-            "bind-command-worktree-delete" => {
-                self.bind_command_worktree_delete = value.to_string();
-                true
-            }
-            "auto-close" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.auto_close = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "daemon-timeout" => match parse_u64(key, value) {
-                Ok(n) => {
-                    self.daemon_timeout = n;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-changes-inactive" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_changes_inactive = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-changes-active" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_changes_active = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-changes-worktree" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_changes_worktree = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-hints-footer" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_hints_footer = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-hints-branches-active" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_hints_branches_active = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-hints-branches-inactive" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_hints_branches_inactive = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-hints-remotes-active" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_hints_remotes_active = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "hide-hints-remotes-inactive" => match parse_bool(key, value) {
-                Ok(b) => {
-                    self.hide_hints_remotes_inactive = b;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
-            "style-icon-daemon-loading" => {
-                self.style_icon_daemon_loading = value.to_string();
-                true
-            }
-            "style-icon-daemon-ready" => {
-                self.style_icon_daemon_ready = value.to_string();
-                true
-            }
-            "style-icon-active" => {
-                self.style_icon_active = value.to_string();
-                true
-            }
-            "style-icon-worktree" => {
-                self.style_icon_worktree = value.to_string();
-                true
-            }
-            "style-icon-agent-idle" => {
-                self.style_icon_agent_idle = value.to_string();
-                true
-            }
-            "style-icon-agent-running" => {
-                self.style_icon_agent_running = value.to_string();
-                true
-            }
-            "style-icon-input" => {
-                self.style_icon_input = value.to_string();
-                true
-            }
-            "style-entries-gap" => match parse_u64(key, value) {
-                Ok(n) => {
-                    self.style_entries_gap = n;
-                    true
-                }
-                Err(msg) => {
-                    feedbacks.push(FeedbackEntry {
-                        level: FeedbackType::Error,
-                        message: msg,
-                    });
-                    true
-                }
-            },
+            "path" => set_path(&mut self.path, key, value, feedbacks),
+            "path-worktrees" => { self.path_worktrees = value.to_string(); true }
+            "bind-jumpto" => { self.bind_jumpto = value.to_string(); true }
+            "bind-command-mode" => set_char(&mut self.bind_command_mode, key, value, feedbacks),
+            "bind-help" => set_char(&mut self.bind_help, key, value, feedbacks),
+            "bind-command-session-kill" => { self.bind_command_session_kill = value.to_string(); true }
+            "bind-command-worktree-new" => { self.bind_command_worktree_new = value.to_string(); true }
+            "bind-command-worktree-delete" => { self.bind_command_worktree_delete = value.to_string(); true }
+            "auto-close" => set_bool(&mut self.auto_close, key, value, feedbacks),
+            "daemon-timeout" => set_u64(&mut self.daemon_timeout, key, value, feedbacks),
+            "hide-changes-inactive" => set_bool(&mut self.hide_changes_inactive, key, value, feedbacks),
+            "hide-changes-active" => set_bool(&mut self.hide_changes_active, key, value, feedbacks),
+            "hide-changes-worktree" => set_bool(&mut self.hide_changes_worktree, key, value, feedbacks),
+            "hide-hints-footer" => set_bool(&mut self.hide_hints_footer, key, value, feedbacks),
+            "hide-hints-branches-active" => set_bool(&mut self.hide_hints_branches_active, key, value, feedbacks),
+            "hide-hints-branches-inactive" => set_bool(&mut self.hide_hints_branches_inactive, key, value, feedbacks),
+            "hide-hints-remotes-active" => set_bool(&mut self.hide_hints_remotes_active, key, value, feedbacks),
+            "hide-hints-remotes-inactive" => set_bool(&mut self.hide_hints_remotes_inactive, key, value, feedbacks),
+            "style-icon-daemon-loading" => { self.style_icon_daemon_loading = value.to_string(); true }
+            "style-icon-daemon-ready" => { self.style_icon_daemon_ready = value.to_string(); true }
+            "style-icon-active" => { self.style_icon_active = value.to_string(); true }
+            "style-icon-worktree" => { self.style_icon_worktree = value.to_string(); true }
+            "style-icon-agent-idle" => { self.style_icon_agent_idle = value.to_string(); true }
+            "style-icon-agent-running" => { self.style_icon_agent_running = value.to_string(); true }
+            "style-icon-input" => { self.style_icon_input = value.to_string(); true }
+            "style-entries-gap" => set_u64(&mut self.style_entries_gap, key, value, feedbacks),
             _ => false,
         }
     }
 
     fn reset_field(&mut self, key: &str) -> bool {
-        let default = Config::default();
+        let d = Config::default();
         match key {
-            "path" => {
-                self.path = default.path;
-                true
-            }
-            "path-worktrees" => {
-                self.path_worktrees = default.path_worktrees;
-                true
-            }
-            "bind-jumpto" => {
-                self.bind_jumpto = default.bind_jumpto;
-                true
-            }
-            "bind-command-mode" => {
-                self.bind_command_mode = default.bind_command_mode;
-                true
-            }
-            "bind-help" => {
-                self.bind_help = default.bind_help;
-                true
-            }
-            "bind-command-session-kill" => {
-                self.bind_command_session_kill = default.bind_command_session_kill;
-                true
-            }
-            "bind-command-worktree-new" => {
-                self.bind_command_worktree_new = default.bind_command_worktree_new;
-                true
-            }
-            "bind-command-worktree-delete" => {
-                self.bind_command_worktree_delete = default.bind_command_worktree_delete;
-                true
-            }
-            "auto-close" => {
-                self.auto_close = default.auto_close;
-                true
-            }
-            "daemon-timeout" => {
-                self.daemon_timeout = default.daemon_timeout;
-                true
-            }
-            "hide-changes-inactive" => {
-                self.hide_changes_inactive = default.hide_changes_inactive;
-                true
-            }
-            "hide-changes-active" => {
-                self.hide_changes_active = default.hide_changes_active;
-                true
-            }
-            "hide-changes-worktree" => {
-                self.hide_changes_worktree = default.hide_changes_worktree;
-                true
-            }
-            "hide-hints-footer" => {
-                self.hide_hints_footer = default.hide_hints_footer;
-                true
-            }
-            "hide-hints-branches-active" => {
-                self.hide_hints_branches_active = default.hide_hints_branches_active;
-                true
-            }
-            "hide-hints-branches-inactive" => {
-                self.hide_hints_branches_inactive = default.hide_hints_branches_inactive;
-                true
-            }
-            "hide-hints-remotes-active" => {
-                self.hide_hints_remotes_active = default.hide_hints_remotes_active;
-                true
-            }
-            "hide-hints-remotes-inactive" => {
-                self.hide_hints_remotes_inactive = default.hide_hints_remotes_inactive;
-                true
-            }
-            "style-icon-daemon-loading" => {
-                self.style_icon_daemon_loading = default.style_icon_daemon_loading;
-                true
-            }
-            "style-icon-daemon-ready" => {
-                self.style_icon_daemon_ready = default.style_icon_daemon_ready;
-                true
-            }
-            "style-icon-active" => {
-                self.style_icon_active = default.style_icon_active;
-                true
-            }
-            "style-icon-worktree" => {
-                self.style_icon_worktree = default.style_icon_worktree;
-                true
-            }
-            "style-icon-agent-idle" => {
-                self.style_icon_agent_idle = default.style_icon_agent_idle;
-                true
-            }
-            "style-icon-agent-running" => {
-                self.style_icon_agent_running = default.style_icon_agent_running;
-                true
-            }
-            "style-icon-input" => {
-                self.style_icon_input = default.style_icon_input;
-                true
-            }
-            "style-entries-gap" => {
-                self.style_entries_gap = default.style_entries_gap;
-                true
-            }
+            "path" => { self.path = d.path; true }
+            "path-worktrees" => { self.path_worktrees = d.path_worktrees; true }
+            "bind-jumpto" => { self.bind_jumpto = d.bind_jumpto; true }
+            "bind-command-mode" => { self.bind_command_mode = d.bind_command_mode; true }
+            "bind-help" => { self.bind_help = d.bind_help; true }
+            "bind-command-session-kill" => { self.bind_command_session_kill = d.bind_command_session_kill; true }
+            "bind-command-worktree-new" => { self.bind_command_worktree_new = d.bind_command_worktree_new; true }
+            "bind-command-worktree-delete" => { self.bind_command_worktree_delete = d.bind_command_worktree_delete; true }
+            "auto-close" => { self.auto_close = d.auto_close; true }
+            "daemon-timeout" => { self.daemon_timeout = d.daemon_timeout; true }
+            "hide-changes-inactive" => { self.hide_changes_inactive = d.hide_changes_inactive; true }
+            "hide-changes-active" => { self.hide_changes_active = d.hide_changes_active; true }
+            "hide-changes-worktree" => { self.hide_changes_worktree = d.hide_changes_worktree; true }
+            "hide-hints-footer" => { self.hide_hints_footer = d.hide_hints_footer; true }
+            "hide-hints-branches-active" => { self.hide_hints_branches_active = d.hide_hints_branches_active; true }
+            "hide-hints-branches-inactive" => { self.hide_hints_branches_inactive = d.hide_hints_branches_inactive; true }
+            "hide-hints-remotes-active" => { self.hide_hints_remotes_active = d.hide_hints_remotes_active; true }
+            "hide-hints-remotes-inactive" => { self.hide_hints_remotes_inactive = d.hide_hints_remotes_inactive; true }
+            "style-icon-daemon-loading" => { self.style_icon_daemon_loading = d.style_icon_daemon_loading; true }
+            "style-icon-daemon-ready" => { self.style_icon_daemon_ready = d.style_icon_daemon_ready; true }
+            "style-icon-active" => { self.style_icon_active = d.style_icon_active; true }
+            "style-icon-worktree" => { self.style_icon_worktree = d.style_icon_worktree; true }
+            "style-icon-agent-idle" => { self.style_icon_agent_idle = d.style_icon_agent_idle; true }
+            "style-icon-agent-running" => { self.style_icon_agent_running = d.style_icon_agent_running; true }
+            "style-icon-input" => { self.style_icon_input = d.style_icon_input; true }
+            "style-entries-gap" => { self.style_entries_gap = d.style_entries_gap; true }
             _ => false,
         }
     }
@@ -679,4 +397,20 @@ fn parse_u64(name: &str, value: &str) -> Result<u64, String> {
             "'{name}' has invalid value {value:?} — expected a non-negative integer, falling back to default"
         )),
     }
+}
+
+fn push_err(fb: &mut Vec<FeedbackEntry>, msg: String) {
+    fb.push(FeedbackEntry { level: FeedbackType::Error, message: msg });
+}
+fn set_bool(slot: &mut bool, key: &str, value: &str, fb: &mut Vec<FeedbackEntry>) -> bool {
+    match parse_bool(key, value) { Ok(v) => *slot = v, Err(m) => push_err(fb, m) } true
+}
+fn set_u64(slot: &mut u64, key: &str, value: &str, fb: &mut Vec<FeedbackEntry>) -> bool {
+    match parse_u64(key, value) { Ok(v) => *slot = v, Err(m) => push_err(fb, m) } true
+}
+fn set_char(slot: &mut char, key: &str, value: &str, fb: &mut Vec<FeedbackEntry>) -> bool {
+    match parse_char(key, value) { Ok(v) => *slot = v, Err(m) => push_err(fb, m) } true
+}
+fn set_path(slot: &mut String, key: &str, value: &str, fb: &mut Vec<FeedbackEntry>) -> bool {
+    match parse_path(key, value) { Ok(()) => *slot = value.to_string(), Err(m) => push_err(fb, m) } true
 }

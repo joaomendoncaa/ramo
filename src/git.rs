@@ -40,8 +40,8 @@ impl<T: Clone> TtlCache<T> {
         }
         v
     }
-    fn load(&self, items: &[(PathBuf, T)], ttl_ms: u128) {
-        let stale = Instant::now() - std::time::Duration::from_millis(ttl_ms as u64 + 1);
+    fn load(&self, items: &[(PathBuf, T)]) {
+        let stale = Instant::now() - std::time::Duration::from_millis((self.ttl_ms + 1) as u64);
         if let Ok(mut m) = self.map.lock() {
             for (k, v) in items {
                 m.insert(k.clone(), (v.clone(), stale));
@@ -49,11 +49,7 @@ impl<T: Clone> TtlCache<T> {
         }
     }
     fn dump(&self) -> Vec<(PathBuf, T)> {
-        self.map
-            .lock()
-            .ok()
-            .map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect())
-            .unwrap_or_default()
+        self.map.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default()
     }
 }
 
@@ -138,8 +134,8 @@ impl GitCache {
     }
 
     pub fn load_disk(&self, cache: &DiskCache) {
-        self.diffs.load(&cache.diffs, CACHE_TTL_MS);
-        self.worktrees.load(&cache.worktrees, WORKTREE_CACHE_TTL_MS);
+        self.diffs.load(&cache.diffs);
+        self.worktrees.load(&cache.worktrees);
     }
     pub fn to_disk(&self) -> DiskCache {
         DiskCache {

@@ -432,16 +432,7 @@ impl Picker {
     }
 
     fn handle_mod_alt(&mut self, key: KeyEvent) {
-        const ALT_COUNT: usize = 4;
         match key.code {
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                if let Some(n) = c.to_digit(10)
-                    && n >= 1
-                    && n as usize <= ALT_COUNT
-                {
-                    self.jump_above(n as usize);
-                }
-            }
             KeyCode::Char('b') => self.move_word(-1),
             KeyCode::Char('f') => self.move_word(1),
             _ => {}
@@ -592,18 +583,6 @@ impl Picker {
 
     fn goto(&mut self) {
         if let Some(&idx) = self.filtered.get(self.cursor) {
-            self.activate_entry(idx);
-        }
-    }
-
-    // Alt+1..Alt+4: open the entry `n` rows above the cursor. Handier than
-    // it sounds — a quick "jump back through recent sessions" gesture.
-    // TODO  does this need to exist? if so, missing UI hints
-    fn jump_above(&mut self, n: usize) {
-        if n > self.cursor {
-            return;
-        }
-        if let Some(&idx) = self.filtered.get(self.cursor - n) {
             self.activate_entry(idx);
         }
     }

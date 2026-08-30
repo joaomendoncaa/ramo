@@ -16,7 +16,7 @@ pub fn run() -> io::Result<()> {
     }
 
     let _ = service::uninstall();
-    daemon::Daemon::kill();
+    daemon::kill();
 
     let state = logs::state_dir();
     if let Err(e) = std::fs::remove_dir_all(&state)

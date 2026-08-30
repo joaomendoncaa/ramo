@@ -6,16 +6,12 @@ use std::process::Command;
 
 const UNIT_NAME: &str = "ramo-daemon.service";
 
-pub fn unit_name() -> &'static str {
-    UNIT_NAME
-}
-
 pub fn unit_dir() -> PathBuf {
     Config::config_base().join("systemd").join("user")
 }
 
 pub fn unit_path() -> PathBuf {
-    unit_dir().join(unit_name())
+    unit_dir().join(UNIT_NAME)
 }
 
 pub fn is_installed() -> bool {
@@ -35,7 +31,7 @@ fn systemctl(args: &[&str]) -> io::Result<bool> {
 }
 
 pub fn stop() -> bool {
-    systemctl(&["stop", unit_name()]).unwrap_or(false)
+    systemctl(&["stop", UNIT_NAME]).unwrap_or(false)
 }
 
 pub fn install() -> io::Result<()> {
@@ -63,14 +59,14 @@ pub fn install() -> io::Result<()> {
     println!("wrote {}", path.display());
 
     match systemctl(&["daemon-reload"]) {
-        Ok(true) => match systemctl(&["enable", "--now", unit_name()]) {
+        Ok(true) => match systemctl(&["enable", "--now", UNIT_NAME]) {
             Ok(true) => println!(
                 "enabled and started {} — the daemon will now start at login",
-                unit_name()
+                UNIT_NAME
             ),
             Ok(false) => eprintln!(
                 "warning: `systemctl --user enable --now {}` failed — run it manually",
-                unit_name()
+                UNIT_NAME
             ),
             Err(e) => eprintln!("warning: failed to run systemctl: {e}"),
         },
@@ -85,8 +81,8 @@ pub fn install() -> io::Result<()> {
 }
 
 pub fn uninstall() -> io::Result<()> {
-    let _ = systemctl(&["stop", unit_name()]);
-    let _ = systemctl(&["disable", unit_name()]);
+    let _ = systemctl(&["stop", UNIT_NAME]);
+    let _ = systemctl(&["disable", UNIT_NAME]);
 
     let path = unit_path();
     match fs::remove_file(&path) {

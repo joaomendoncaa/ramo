@@ -32,23 +32,60 @@ fn layout_constraints(gap: u16, hide_footer: bool, feedbacks: usize) -> Vec<Cons
     c
 }
 
-pub fn render(frame: &mut Frame, picker: &mut Picker) {
-    if picker.is_help() {
-        return render_help(frame, picker);
-    }
+struct Slots {
+    entries: Rect,
+    input: Rect,
+    after: usize,
+    gap: u16,
+    raw: Vec<Rect>,
+}
+fn prepare_slots(picker: &mut Picker, area: Rect) -> Slots {
     let gap = picker.config.style_entries_gap.min(u64::from(u16::MAX)) as u16;
-    let slots = Layout::vertical(layout_constraints(
+    let raw = Layout::vertical(layout_constraints(
         gap,
         picker.config.hide_hints_footer,
         picker.feedbacks.len(),
     ))
-    .split(frame.area());
-    let slot_entries = slots[0];
-    let slot_entries_height = slot_entries.height as usize;
+    .split(area)
+    .to_vec();
     let input_idx = if gap > 0 { 2 } else { 1 };
-    let after_input_idx = input_idx + 1 + usize::from(gap > 0);
-    let slot_input = slots[input_idx];
-    picker.slot_entries = slot_entries;
+    let after = input_idx + 1 + usize::from(gap > 0);
+    let entries = raw[0];
+    let input = raw[input_idx];
+    picker.slot_entries = entries;
+    Slots { entries, input, after, gap, raw }
+}
+fn render_bottom(frame: &mut Frame, picker: &mut Picker, slots: &Slots) {
+    if slots.gap > 0 {
+        frame.render_widget(Paragraph::new(""), slots.raw[1]);
+        let input_idx = if slots.gap > 0 { 2 } else { 1 };
+        frame.render_widget(Paragraph::new(""), slots.raw[input_idx + 1]);
+    }
+    let mut idx = slots.after;
+    if !picker.config.hide_hints_footer {
+        let hovered = picker
+            .clickables
+            .iter()
+            .find(|c| c.contains(picker.last_mouse_col, picker.last_mouse_row))
+            .map(|c| c.action);
+        frame.render_widget(Paragraph::new(hints_line(picker, hovered)), slots.raw[idx]);
+        idx += 1;
+    }
+    for fb in &picker.feedbacks {
+        frame.render_widget(Paragraph::new(feedback(fb)), slots.raw[idx]);
+        idx += 1;
+    }
+}
+
+pub fn render(frame: &mut Frame, picker: &mut Picker) {
+    if picker.is_help() {
+        return render_help(frame, picker);
+    }
+    let slots = prepare_slots(picker, frame.area());
+    let slot_entries = slots.entries;
+    let slot_entries_height = slot_entries.height as usize;
+    let slot_input = slots.input;
+    let after_input_idx = slots.after;
 
     if picker.entries.is_empty() {
         loader(frame, frame.area(), picker.spinner);
@@ -116,7 +153,7 @@ pub fn render(frame: &mut Frame, picker: &mut Picker) {
         }
     }
     if !picker.config.hide_hints_footer {
-        build_hints_clickables(picker, slots[after_input_idx]);
+        build_hints_clickables(picker, slots.raw[after_input_idx]);
     }
 
     let entries = &picker.entries;
@@ -170,41 +207,16 @@ pub fn render(frame: &mut Frame, picker: &mut Picker) {
     }
 
     frame.render_widget(Paragraph::new(lines), slot_entries);
-    if gap > 0 {
-        frame.render_widget(Paragraph::new(""), slots[1]);
-        frame.render_widget(Paragraph::new(""), slots[input_idx + 1]);
-    }
     frame.render_widget(Paragraph::new(input_line(picker)), slot_input);
-    let mut idx = after_input_idx;
-    if !picker.config.hide_hints_footer {
-        let hovered = picker
-            .clickables
-            .iter()
-            .find(|c| c.contains(picker.last_mouse_col, picker.last_mouse_row))
-            .map(|c| c.action);
-        frame.render_widget(Paragraph::new(hints_line(picker, hovered)), slots[idx]);
-        idx += 1;
-    }
-    for fb in &picker.feedbacks {
-        frame.render_widget(Paragraph::new(feedback(fb)), slots[idx]);
-        idx += 1;
-    }
+    render_bottom(frame, picker, &slots);
 }
 
 fn render_help(frame: &mut Frame, picker: &mut Picker) {
-    let gap = picker.config.style_entries_gap.min(u64::from(u16::MAX)) as u16;
-    let slots = Layout::vertical(layout_constraints(
-        gap,
-        picker.config.hide_hints_footer,
-        picker.feedbacks.len(),
-    ))
-    .split(frame.area());
-    let slot_entries = slots[0];
+    let slots = prepare_slots(picker, frame.area());
+    let slot_entries = slots.entries;
     let slot_entries_height = slot_entries.height as usize;
-    let input_idx = if gap > 0 { 2 } else { 1 };
-    let after_input_idx = input_idx + 1 + usize::from(gap > 0);
-    let slot_input = slots[input_idx];
-    picker.slot_entries = slot_entries;
+    let slot_input = slots.input;
+    let after_input_idx = slots.after;
 
     let display_lines = picker.help_visible_lines();
     let total = display_lines.len();
@@ -256,29 +268,12 @@ fn render_help(frame: &mut Frame, picker: &mut Picker) {
 
     picker.clickables.clear();
     if !picker.config.hide_hints_footer {
-        build_hints_clickables(picker, slots[after_input_idx]);
+        build_hints_clickables(picker, slots.raw[after_input_idx]);
     }
 
     frame.render_widget(Paragraph::new(lines), slot_entries);
-    if gap > 0 {
-        frame.render_widget(Paragraph::new(""), slots[1]);
-        frame.render_widget(Paragraph::new(""), slots[input_idx + 1]);
-    }
     frame.render_widget(Paragraph::new(help_input(picker)), slot_input);
-    let mut idx = after_input_idx;
-    if !picker.config.hide_hints_footer {
-        let hovered = picker
-            .clickables
-            .iter()
-            .find(|c| c.contains(picker.last_mouse_col, picker.last_mouse_row))
-            .map(|c| c.action);
-        frame.render_widget(Paragraph::new(hints_line(picker, hovered)), slots[idx]);
-        idx += 1;
-    }
-    for fb in &picker.feedbacks {
-        frame.render_widget(Paragraph::new(feedback(fb)), slots[idx]);
-        idx += 1;
-    }
+    render_bottom(frame, picker, &slots);
 }
 
 pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Line<'_> {

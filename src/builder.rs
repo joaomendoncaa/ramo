@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::git::GitCache;
-use crate::metrics::BuildTimings;
 use crate::model::{
     Changes, Entry, EntryType, Goto, Opencode, TmuxPane, TmuxSession, WorktreeInfo,
 };
@@ -11,7 +10,6 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
 
 pub struct TreeBuilder {
     git_cache: GitCache,
@@ -35,19 +33,15 @@ impl TreeBuilder {
         self.git_cache.to_disk()
     }
 
-    pub fn build(&self, config: &Config) -> (Vec<Entry>, BuildTimings) {
-        let tmux_start = Instant::now();
+    pub fn build(&self, config: &Config) -> Vec<Entry> {
         let snap = tmux::snapshot();
         let sessions = snap.sessions;
         let panes = snap.panes;
-        let tmux_ms = tmux_start.elapsed().as_millis();
 
-        let oc_start = Instant::now();
         let oc_sessions = opencode::list_sessions_cached(
             &mut self.oc_db.lock().unwrap(),
             &mut self.oc_tracker.lock().unwrap(),
         );
-        let oc_ms = oc_start.elapsed().as_millis();
         let oc_panes = tmux::opencode_panes(&panes);
         let pane_sessions = match_panes_to_sessions(&oc_panes, &oc_sessions);
 
@@ -58,9 +52,7 @@ impl TreeBuilder {
             .map(|d| d.path.clone())
             .collect();
 
-        let git_start = Instant::now();
         let git_data = self.git_phase(&dirs, &open, config);
-        let git_ms = git_start.elapsed().as_millis();
 
         let covered_paths: Vec<PathBuf> = dirs.iter().map(|d| d.path.clone()).collect();
         let covered_names: Vec<String> = dirs.iter().map(|d| d.name.clone()).collect();
@@ -90,17 +82,7 @@ impl TreeBuilder {
             pos += 1;
         }
 
-        (
-            rows,
-            BuildTimings {
-                tmux_ms,
-                oc_ms,
-                git_ms,
-                serialize_ms: 0,
-                dirs_total: dirs.len(),
-                dirs_refreshed: dirs.len(),
-            },
-        )
+        rows
     }
 
     fn git_phase(&self, dirs: &[DirInfo], open: &HashSet<PathBuf>, config: &Config) -> Vec<DirGit> {

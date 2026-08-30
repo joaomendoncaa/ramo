@@ -292,78 +292,37 @@ pub fn surgical_delete(existing: Option<&str>, key: &str) -> Option<String> {
     Some(out)
 }
 
-pub fn commit_to_disk(key: &str, new_value: &str) -> Result<(), String> {
-    let target = Config::write_target();
-    let existing = std::fs::read_to_string(&target).ok();
-
-    // If new value equals default, delete that key (and possibly the file)
-    if is_default_value(key, new_value) {
-        let Some(new_content) = surgical_delete(existing.as_deref(), key) else {
-            // No selectable left — delete file if it exists
-            if target.exists() {
-                let _ = std::fs::remove_file(&target);
-            }
-            return Ok(());
-        };
-        // If surgical_delete returned Some but content unchanged (key not present), nothing to write
-        if let Some(ref existing_content) = existing {
-            if &new_content == existing_content {
-                return Ok(());
-            }
-        }
-        if let Some(parent) = target.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return Err(format!(
-                    "cannot write config file '{}': {e}",
-                    target.display()
-                ));
-            }
-        }
-        let tmp = target.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp, &new_content) {
-            return Err(format!(
-                "cannot write config file '{}': {e}",
-                target.display()
-            ));
-        }
-        if let Err(e) = std::fs::rename(&tmp, &target) {
-            if let Err(e2) = std::fs::write(&target, &new_content) {
-                return Err(format!(
-                    "cannot write config file '{}': {e2} (rename also failed: {e})",
-                    target.display()
-                ));
-            }
-        }
-        return Ok(());
-    }
-
-    let new_content = surgical_write(existing.as_deref(), key, new_value);
+fn write_atomic(target: &std::path::Path, content: &str) -> Result<(), String> {
     if let Some(parent) = target.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return Err(format!(
-                "cannot write config file '{}': {e}",
-                target.display()
-            ));
+            return Err(format!("cannot write config file '{}': {e}", target.display()));
         }
     }
-    // Atomic-ish: write to temp then rename
     let tmp = target.with_extension("tmp");
-    if let Err(e) = std::fs::write(&tmp, &new_content) {
-        return Err(format!(
-            "cannot write config file '{}': {e}",
-            target.display()
-        ));
+    if let Err(e) = std::fs::write(&tmp, content) {
+        return Err(format!("cannot write config file '{}': {e}", target.display()));
     }
-    if let Err(e) = std::fs::rename(&tmp, &target) {
-        // fallback to direct write if rename fails (cross-fs)
-        if let Err(e2) = std::fs::write(&target, &new_content) {
-            return Err(format!(
-                "cannot write config file '{}': {e2} (rename also failed: {e})",
-                target.display()
-            ));
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        if let Err(e2) = std::fs::write(target, content) {
+            return Err(format!("cannot write config file '{}': {e2} (rename also failed: {e})", target.display()));
         }
     }
     Ok(())
+}
+
+pub fn commit_to_disk(key: &str, new_value: &str) -> Result<(), String> {
+    let target = Config::write_target();
+    let existing = std::fs::read_to_string(&target).ok();
+    if is_default_value(key, new_value) {
+        let Some(new_content) = surgical_delete(existing.as_deref(), key) else {
+            if target.exists() { let _ = std::fs::remove_file(&target); }
+            return Ok(());
+        };
+        if let Some(ref ec) = existing { if &new_content == ec { return Ok(()); } }
+        return write_atomic(&target, &new_content);
+    }
+    let new_content = surgical_write(existing.as_deref(), key, new_value);
+    write_atomic(&target, &new_content)
 }
 
 #[cfg(test)]
