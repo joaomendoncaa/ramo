@@ -6,23 +6,17 @@ use crate::model::{
 use crate::opencode;
 use crate::tmux;
 use crate::util;
-use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 pub struct TreeBuilder {
     git_cache: GitCache,
-    oc_db: Mutex<Option<Connection>>,
-    oc_tracker: Mutex<opencode::OcTracker>,
 }
 
 impl TreeBuilder {
     pub fn new() -> Self {
         TreeBuilder {
             git_cache: GitCache::new(),
-            oc_db: Mutex::new(None),
-            oc_tracker: Mutex::new(opencode::OcTracker::default()),
         }
     }
 
@@ -38,10 +32,7 @@ impl TreeBuilder {
         let sessions = snap.sessions;
         let panes = snap.panes;
 
-        let oc_sessions = opencode::list_sessions_cached(
-            &mut self.oc_db.lock().unwrap(),
-            &mut self.oc_tracker.lock().unwrap(),
-        );
+        let oc_sessions = opencode::list_sessions();
         let oc_panes = tmux::opencode_panes(&panes);
         let pane_sessions = match_panes_to_sessions(&oc_panes, &oc_sessions);
 

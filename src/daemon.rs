@@ -58,8 +58,6 @@ const CACHE_SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
 
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedCache {
-    version: u32,
-    saved_at_ms: u128,
     git: crate::git::DiskCache,
     entries: Vec<Entry>,
     entries_found: usize,
@@ -71,18 +69,11 @@ fn cache_path() -> PathBuf {
 
 fn load_persisted_cache() -> Option<PersistedCache> {
     let bytes = std::fs::read(cache_path()).ok()?;
-    let cache: PersistedCache = serde_json::from_slice(&bytes).ok()?;
-    (cache.version == 1).then_some(cache)
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn save_persisted_cache(builder: &TreeBuilder, payload: &Payload) {
-    let saved_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
     let cache = PersistedCache {
-        version: 1,
-        saved_at_ms,
         git: builder.to_disk_cache(),
         entries: payload.entries.clone(),
         entries_found: payload.entries_found,

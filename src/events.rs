@@ -17,69 +17,7 @@ impl Picker {
                 self.commit_help_edit();
                 return;
             }
-            if Config::key_matches(&self.config.bind_input_left, key) {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                }
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_right, key) {
-                if self.input_cursor < self.input.len() {
-                    self.input_cursor += 1;
-                }
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_backspace, key) {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    self.input.remove(self.input_cursor);
-                }
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_delete, key) && self.input_cursor < self.input.len() {
-                self.input.remove(self.input_cursor);
-                return;
-            }
-            // input editing bindings
-            if Config::key_matches(&self.config.bind_input_home, key) {
-                self.input_cursor = 0;
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_end, key) {
-                self.input_cursor = self.input.len();
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_kill_line, key) {
-                self.input.drain(self.input_cursor..);
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_delete_word, key) {
-                let bytes = self.input.as_bytes();
-                let mut i = self.input_cursor;
-                while i > 0 && bytes[i - 1].is_ascii_whitespace() {
-                    i -= 1;
-                }
-                while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
-                    i -= 1;
-                }
-                self.input.drain(i..self.input_cursor);
-                self.input_cursor = i;
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_word_left, key) {
-                self.move_word(-1);
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_word_right, key) {
-                self.move_word(1);
-                return;
-            }
-            // char insertion
-            if let KeyCode::Char(c) = key.code
-                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-            {
-                self.input.insert(self.input_cursor, c);
-                self.input_cursor += 1;
+            if self.edit_input(key).is_some() {
                 return;
             }
             return;
@@ -175,43 +113,12 @@ impl Picker {
                 self.start_help_edit();
                 return;
             }
-            if Config::key_matches(&self.config.bind_input_left, key) {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                }
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_right, key) {
-                if self.input_cursor < self.input.len() {
-                    self.input_cursor += 1;
-                }
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_backspace, key) {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    self.input.remove(self.input_cursor);
+            if let Some(needs_clamp) = self.edit_input(key) {
+                if needs_clamp {
                     self.help_cursor = 0;
                     self.help_scroll = 0;
                     self.help_clamp_cursor();
                 }
-                return;
-            }
-            if Config::key_matches(&self.config.bind_input_delete, key) && self.input_cursor < self.input.len() {
-                self.input.remove(self.input_cursor);
-                self.help_cursor = 0;
-                self.help_scroll = 0;
-                self.help_clamp_cursor();
-                return;
-            }
-            if let KeyCode::Char(c) = key.code
-                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-            {
-                self.input.insert(self.input_cursor, c);
-                self.input_cursor += 1;
-                self.help_cursor = 0;
-                self.help_scroll = 0;
-                self.help_clamp_cursor();
                 return;
             }
             return;
@@ -280,15 +187,6 @@ impl Picker {
             return;
         }
 
-        if Config::key_matches(&self.config.bind_input_word_left, key) {
-            self.move_word(-1);
-            return;
-        }
-        if Config::key_matches(&self.config.bind_input_word_right, key) {
-            self.move_word(1);
-            return;
-        }
-
         if Config::key_matches(&self.config.bind_nav_up, key) {
             self.move_cursor(-1);
             return;
@@ -309,21 +207,10 @@ impl Picker {
             self.quit = true;
             return;
         }
-        if Config::key_matches(&self.config.bind_input_home, key) {
-            self.input_cursor = 0;
-            return;
-        }
-        if Config::key_matches(&self.config.bind_input_end, key) {
-            self.input_cursor = self.input.len();
-            return;
-        }
-        if Config::key_matches(&self.config.bind_input_kill_line, key) {
-            self.input.drain(self.input_cursor..);
-            self.filter();
-            return;
-        }
-        if Config::key_matches(&self.config.bind_input_delete_word, key) {
-            self.delete_word_back();
+        if let Some(needs_filter) = self.edit_input(key) {
+            if needs_filter {
+                self.filter();
+            }
             return;
         }
         if Config::key_matches(&self.config.bind_input_clear, key) {
@@ -458,37 +345,11 @@ impl Picker {
             self.quit = true;
             return;
         }
-        if Config::key_matches(&self.config.bind_input_left, key) {
-            if self.input_cursor > 0 {
-                self.input_cursor -= 1;
-            }
-            return;
-        }
-        if Config::key_matches(&self.config.bind_input_right, key) {
-            if self.input_cursor < self.input.len() {
-                self.input_cursor += 1;
-            }
-            return;
-        }
-        if Config::key_matches(&self.config.bind_input_backspace, key) {
-            if self.input_cursor > 0 {
-                self.input_cursor -= 1;
-                self.input.remove(self.input_cursor);
+        if let Some(needs_filter) = self.edit_input(key) {
+            if needs_filter {
                 self.filter();
             }
             return;
-        }
-        if Config::key_matches(&self.config.bind_input_delete, key) && self.input_cursor < self.input.len() {
-            self.input.remove(self.input_cursor);
-            self.filter();
-            return;
-        }
-        if let KeyCode::Char(c) = key.code
-            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-        {
-            self.input.insert(self.input_cursor, c);
-            self.input_cursor += 1;
-            self.filter();
         }
     }
 
@@ -574,6 +435,68 @@ impl Picker {
         }
     }
 
+    // Shared line-edit handler. Returns Some(true) if content changed (needs filter/clamp),
+    // Some(false) if only cursor moved, None if not handled.
+    fn edit_input(&mut self, key: KeyEvent) -> Option<bool> {
+        if Config::key_matches(&self.config.bind_input_left, key) {
+            if self.input_cursor > 0 { self.input_cursor -= 1; }
+            return Some(false);
+        }
+        if Config::key_matches(&self.config.bind_input_right, key) {
+            if self.input_cursor < self.input.len() { self.input_cursor += 1; }
+            return Some(false);
+        }
+        if Config::key_matches(&self.config.bind_input_home, key) {
+            self.input_cursor = 0;
+            return Some(false);
+        }
+        if Config::key_matches(&self.config.bind_input_end, key) {
+            self.input_cursor = self.input.len();
+            return Some(false);
+        }
+        if Config::key_matches(&self.config.bind_input_kill_line, key) {
+            self.input.drain(self.input_cursor..);
+            return Some(true);
+        }
+        if Config::key_matches(&self.config.bind_input_delete_word, key) {
+            let bytes = self.input.as_bytes();
+            let mut i = self.input_cursor;
+            while i > 0 && bytes[i - 1].is_ascii_whitespace() { i -= 1; }
+            while i > 0 && !bytes[i - 1].is_ascii_whitespace() { i -= 1; }
+            self.input.drain(i..self.input_cursor);
+            self.input_cursor = i;
+            return Some(true);
+        }
+        if Config::key_matches(&self.config.bind_input_word_left, key) {
+            self.move_word(-1);
+            return Some(false);
+        }
+        if Config::key_matches(&self.config.bind_input_word_right, key) {
+            self.move_word(1);
+            return Some(false);
+        }
+        if Config::key_matches(&self.config.bind_input_backspace, key) {
+            if self.input_cursor > 0 {
+                self.input_cursor -= 1;
+                self.input.remove(self.input_cursor);
+                return Some(true);
+            }
+            return Some(false);
+        }
+        if Config::key_matches(&self.config.bind_input_delete, key) && self.input_cursor < self.input.len() {
+            self.input.remove(self.input_cursor);
+            return Some(true);
+        }
+        if let KeyCode::Char(c) = key.code
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            self.input.insert(self.input_cursor, c);
+            self.input_cursor += 1;
+            return Some(true);
+        }
+        None
+    }
+
     fn move_word(&mut self, dir: i32) {
         let bytes = self.input.as_bytes();
         if dir < 0 {
@@ -595,20 +518,6 @@ impl Picker {
             }
             self.input_cursor = i;
         }
-    }
-
-    fn delete_word_back(&mut self) {
-        let bytes = self.input.as_bytes();
-        let mut i = self.input_cursor;
-        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
-            i -= 1;
-        }
-        while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
-            i -= 1;
-        }
-        self.input.drain(i..self.input_cursor);
-        self.input_cursor = i;
-        self.filter();
     }
 
     fn get_index_from_mouse(&self, column: u16, row: u16) -> Option<usize> {
