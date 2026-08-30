@@ -68,15 +68,13 @@ fn query_sessions(conn: &Connection, tracker: &mut OcTracker) -> Vec<Opencode> {
         if let Ok(mut stmt) = conn.prepare(
             "SELECT session_id, time_created, data FROM part
              WHERE time_created >= ? ORDER BY time_created DESC",
-        )
-        && let Ok(rows) = stmt.query_map([cutoff], |r| {
+        ) && let Ok(rows) = stmt.query_map([cutoff], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
             ))
-        })
-        {
+        }) {
             for row in rows.flatten() {
                 let (session_id, time_created, data) = row;
                 record_part(tracker, session_id, time_created, &data);
@@ -94,16 +92,14 @@ fn query_sessions(conn: &Connection, tracker: &mut OcTracker) -> Vec<Opencode> {
         if let Ok(mut stmt) = conn.prepare(
             "SELECT rowid, session_id, time_created, data FROM part
              WHERE rowid > ? ORDER BY rowid DESC",
-        )
-        && let Ok(rows) = stmt.query_map([tracker.last_rowid], |r| {
+        ) && let Ok(rows) = stmt.query_map([tracker.last_rowid], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
                 r.get::<_, String>(3)?,
             ))
-        })
-        {
+        }) {
             for row in rows.flatten() {
                 let (rowid, session_id, time_created, data) = row;
                 tracker.last_rowid = tracker.last_rowid.max(rowid);
@@ -134,10 +130,7 @@ fn query_sessions(conn: &Connection, tracker: &mut OcTracker) -> Vec<Opencode> {
     rows.map(|rs| {
         rs.filter_map(|r| r.ok())
             .map(|(id, title, dir, updated)| Opencode {
-                is_running: tracker
-                    .latest
-                    .get(&id)
-                    .is_some_and(|(_, idle)| !idle),
+                is_running: tracker.latest.get(&id).is_some_and(|(_, idle)| !idle),
                 id,
                 title,
                 directory: PathBuf::from(dir),

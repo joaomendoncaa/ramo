@@ -4,7 +4,6 @@ use ratatui::style::Color;
 pub const HOVER_BG: Color = Color::Rgb(0xff, 0x00, 0x00);
 pub const HOVER_FG: Color = Color::Rgb(0xff, 0xff, 0xff);
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
     CommandMode,
@@ -13,12 +12,6 @@ pub enum Action {
     ExitHelp,
     KillSession,
     OpenDetached,
-    MovePrevious,
-    MoveNext,
-    MoveUp,
-    MoveDown,
-    ResetInput,
-    Close,
 }
 
 #[derive(Debug, Clone)]

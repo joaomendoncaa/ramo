@@ -33,9 +33,7 @@ pub fn key_at_line(line: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return None;
     }
-    trimmed
-        .split_once('=')
-        .map(|(k, _)| k.trim().to_string())
+    trimmed.split_once('=').map(|(k, _)| k.trim().to_string())
 }
 
 pub fn key_at(lines: &[String], idx: usize) -> Option<String> {
@@ -74,6 +72,7 @@ pub fn is_default_value(key: &str, new_value: &str) -> bool {
     Config::is_default_value(key, new_value)
 }
 
+#[allow(dead_code)]
 pub fn display_line(line: &str, config: &Config) -> String {
     if let Some(k) = key_at_line(line) {
         if let Some(v) = config.value_string(&k) {
@@ -162,7 +161,10 @@ pub fn filtered_visible_lines(filter: &str, config: &Config) -> Vec<String> {
     if filter_trim.is_empty() {
         return display_lines(config);
     }
-    let words: Vec<String> = filter_trim.split_whitespace().map(|s| s.to_string()).collect();
+    let words: Vec<String> = filter_trim
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
     let raw = raw_file_map();
     let mut out = Vec::new();
     for block in blocks {
@@ -188,7 +190,11 @@ pub fn filtered_visible_lines(filter: &str, config: &Config) -> Vec<String> {
                 out.push(format!("{k} = {v}"));
             } else {
                 // fallback to template line
-                if let Some(idx) = block.entries.iter().position(|&x| key_at(&lines, x).as_deref() == Some(&k)) {
+                if let Some(idx) = block
+                    .entries
+                    .iter()
+                    .position(|&x| key_at(&lines, x).as_deref() == Some(&k))
+                {
                     out.push(lines[block.entries[idx]].clone());
                 }
             }
@@ -392,10 +398,7 @@ mod tests {
         let out = display_line("path = ~/Projects/*", &cfg);
         assert_eq!(out, "path = ~/lab/*");
         // comment unchanged
-        assert_eq!(
-            display_line("# comment line", &cfg),
-            "# comment line"
-        );
+        assert_eq!(display_line("# comment line", &cfg), "# comment line");
     }
 
     #[test]
@@ -514,7 +517,10 @@ mod tests {
         std::fs::write(&target, "auto-close = false\n").unwrap();
         // now set to default true -> should delete
         commit_to_disk("auto-close", "true").unwrap();
-        assert!(!target.exists(), "file should be deleted when only default remains");
+        assert!(
+            !target.exists(),
+            "file should be deleted when only default remains"
+        );
         // create file with two keys, one default, one non-default
         std::fs::write(&target, "path = ~/lab/*\nauto-close = false\n").unwrap();
         commit_to_disk("auto-close", "true").unwrap();
@@ -595,20 +601,37 @@ mod tests {
         // Find block containing auto-close
         let auto_block = blocks
             .iter()
-            .find(|b| b.entries.iter().any(|&idx| key_at(&lines, idx).as_deref() == Some("auto-close")))
+            .find(|b| {
+                b.entries
+                    .iter()
+                    .any(|&idx| key_at(&lines, idx).as_deref() == Some("auto-close"))
+            })
             .unwrap();
         assert!(!auto_block.header.is_empty());
-        assert!(auto_block.header.iter().any(|h| h.contains("defines if the picker")));
+        assert!(
+            auto_block
+                .header
+                .iter()
+                .any(|h| h.contains("defines if the picker"))
+        );
         // hide-changes block should have no header
         let hide_block = blocks
             .iter()
-            .find(|b| b.entries.iter().any(|&idx| key_at(&lines, idx).as_deref() == Some("hide-changes-inactive")))
+            .find(|b| {
+                b.entries
+                    .iter()
+                    .any(|&idx| key_at(&lines, idx).as_deref() == Some("hide-changes-inactive"))
+            })
             .unwrap();
         assert!(hide_block.header.is_empty());
         // bind-help block should have shenanigans header
         let bind_block = blocks
             .iter()
-            .find(|b| b.entries.iter().any(|&idx| key_at(&lines, idx).as_deref() == Some("bind-help")))
+            .find(|b| {
+                b.entries
+                    .iter()
+                    .any(|&idx| key_at(&lines, idx).as_deref() == Some("bind-help"))
+            })
             .unwrap();
         assert!(bind_block.header.iter().any(|h| h.contains("shenanigans")));
     }
@@ -630,7 +653,13 @@ mod tests {
         let cfg = Config::default();
         let visible = filtered_visible_lines("hide-changes", &cfg);
         // should match 3 hide-changes entries, no header
-        assert_eq!(visible.iter().filter(|l| l.contains("hide-changes")).count(), 3);
+        assert_eq!(
+            visible
+                .iter()
+                .filter(|l| l.contains("hide-changes"))
+                .count(),
+            3
+        );
         assert!(!visible.iter().any(|l| l.trim().starts_with('#')));
     }
 }

@@ -2,15 +2,11 @@ use crate::picker::Picker;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event},
     execute,
-    style::Print,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io::{self, Stdout, stdout};
 use std::time::Duration;
-
-const ENABLE_MOUSE_TRACKING: &str = "\x1b[?1003h\x1b[?1006h";
-const DISABLE_MOUSE_TRACKING: &str = "\x1b[?1003l\x1b[?1006l";
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -21,12 +17,7 @@ pub struct Tui {
 impl Tui {
     pub fn new() -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(
-            stdout(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            Print(ENABLE_MOUSE_TRACKING),
-        )?;
+        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
         let term = Terminal::new(CrosstermBackend::new(stdout()))?;
         Ok(Self { term })
     }
@@ -45,12 +36,7 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        let _ = execute!(
-            stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            Print(DISABLE_MOUSE_TRACKING),
-        );
+        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
         let _ = disable_raw_mode();
     }
 }

@@ -45,7 +45,6 @@ pub struct Picker {
     pub(crate) mouse_hover: bool,
     pub(crate) auto_close: bool,
     pub(crate) mode: Mode,
-    pub(crate) reveal_open: bool,
     pub(crate) config: Config,
     pub(crate) feedbacks: Vec<FeedbackEntry>,
     pub(crate) entries_found: usize,
@@ -91,7 +90,6 @@ impl Picker {
             clickables: Vec::new(),
             last_mouse_col: 0,
             last_mouse_row: 0,
-            reveal_open: true,
             auto_close,
             config: payload.config,
             feedbacks: payload.feedbacks,
@@ -134,10 +132,19 @@ impl Picker {
                 self.feedbacks = payload.feedbacks.clone();
                 self.config = payload.config;
                 self.auto_close = self.config.auto_close;
-                self.filtered = self.filtered();
+                if self.is_help() {
+                    let saved_input =
+                        std::mem::replace(&mut self.input, self.stashed_input.clone());
+                    let saved_cursor =
+                        std::mem::replace(&mut self.input_cursor, self.stashed_cursor);
+                    self.filtered = self.filtered();
+                    self.input = saved_input;
+                    self.input_cursor = saved_cursor;
+                } else {
+                    self.filtered = self.filtered();
+                }
                 if (is_empty && !self.filtered.is_empty()) || path_changed {
                     self.cursor = self.find_initial_cursor();
-                    self.reveal_open = true;
                 } else if self.cursor >= self.filtered.len() {
                     self.cursor = self.filtered.len().saturating_sub(1);
                 }
@@ -164,7 +171,7 @@ impl Picker {
     }
 
     pub fn render(&mut self, frame: &mut ratatui::Frame, _config: &Config) {
-        crate::renderer::Renderer::render(frame, self);
+        crate::renderer::render(frame, self);
     }
 
     pub(crate) fn schedule_initial_fetch(&mut self, overrides: Vec<(String, Option<String>)>) {
@@ -199,10 +206,6 @@ impl Picker {
     }
     pub fn is_help(&self) -> bool {
         self.mode == Mode::Help || self.mode == Mode::HelpEditing
-    }
-    #[allow(dead_code)]
-    pub fn is_help_editing(&self) -> bool {
-        self.mode == Mode::HelpEditing
     }
 
     pub fn cursor_entry_buttons(&self) -> Vec<(String, Action)> {
@@ -289,6 +292,7 @@ impl Picker {
         self.help_stashed_filter.clear();
         self.help_stashed_filter_cursor = 0;
         self.mouse_hover = false;
+        self.filter();
     }
 
     pub fn start_help_edit(&mut self) {
@@ -356,9 +360,9 @@ impl Picker {
             });
         } else {
             // optimistic re-parse for immediate feedback
-            if let Some(path) = crate::config::Config::config_path().or(Some(
-                crate::config::Config::write_target(),
-            )) {
+            if let Some(path) =
+                crate::config::Config::config_path().or(Some(crate::config::Config::write_target()))
+            {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let (cfg, fbs) = crate::config::Config::parse_content(&path, &content);
                     self.config = cfg;
@@ -366,8 +370,10 @@ impl Picker {
                 } else {
                     // if write_target was new file, parse that
                     let dummy_path = std::path::Path::new("config");
-                    let (cfg, fbs) =
-                        crate::config::Config::parse_content(dummy_path, &format!("{key} = {new_value}"));
+                    let (cfg, fbs) = crate::config::Config::parse_content(
+                        dummy_path,
+                        &format!("{key} = {new_value}"),
+                    );
                     self.config = cfg;
                     self.feedbacks = fbs;
                 }
@@ -511,6 +517,7 @@ impl Picker {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn help_filtered_count(&self) -> usize {
         self.help_filtered_line_indices().len()
     }
@@ -584,7 +591,6 @@ mod tests {
             mouse_hover: false,
             auto_close: true,
             mode: Mode::Normal,
-            reveal_open: false,
             config,
             feedbacks: vec![],
             entries_found: 0,
@@ -637,10 +643,7 @@ mod tests {
 
     #[test]
     fn zero_gap_is_plain_list() {
-        let picker = picker_with(
-            &[EntryType::Dir, EntryType::Worktree, EntryType::Agent],
-            0,
-        );
+        let picker = picker_with(&[EntryType::Dir, EntryType::Worktree, EntryType::Agent], 0);
         assert_eq!(row_marks(&picker.rows()), "eee");
     }
 
@@ -699,7 +702,8 @@ mod tests {
         use std::sync::{Mutex, OnceLock};
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!("ramo_test_help_edit_raw_{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("ramo_test_help_edit_raw_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".config/ramo")).unwrap();
         let orig_home = std::env::var("HOME").ok();
@@ -747,7 +751,10 @@ mod tests {
         let mut p = picker_with(&[EntryType::Dir], 0);
         p.enter_help();
         assert!(!p.help_is_filtered());
-        assert_eq!(p.help_filtered_count(), crate::help::selectable_indices(&crate::help::template_lines()).len());
+        assert_eq!(
+            p.help_filtered_count(),
+            crate::help::selectable_indices(&crate::help::template_lines()).len()
+        );
         // filter for "auto" should match auto-close only (maybe) + its header
         p.input = "auto".to_string();
         p.input_cursor = 4;

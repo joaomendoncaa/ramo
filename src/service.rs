@@ -74,12 +74,12 @@ pub fn install() -> io::Result<()> {
             ),
             Err(e) => eprintln!("warning: failed to run systemctl: {e}"),
         },
-        Ok(false) => eprintln!(
-            "warning: `systemctl --user daemon-reload` failed — run it manually"
-        ),
-        Err(e) => eprintln!(
-            "warning: systemctl not available ({e}) — unit installed but not enabled"
-        ),
+        Ok(false) => {
+            eprintln!("warning: `systemctl --user daemon-reload` failed — run it manually")
+        }
+        Err(e) => {
+            eprintln!("warning: systemctl not available ({e}) — unit installed but not enabled")
+        }
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 use crate::builder::TreeBuilder;
 use crate::config::Config;
 use crate::logs;
-use crate::metrics::{self, BuildTimings, Metrics};
+use crate::metrics::BuildTimings;
 use crate::model::{Entry, FeedbackEntry, FeedbackType, Payload};
 use crate::service;
 use serde::{Deserialize, Serialize};
@@ -290,23 +290,6 @@ fn is_dead(stream: &mut UnixStream) -> bool {
     dead
 }
 
-fn record_metrics(metrics: &Mutex<Metrics>, timings: &BuildTimings, builder: &TreeBuilder) {
-    let mut m = metrics.lock().unwrap();
-    m.record_build(timings);
-    m.git_spawns = builder.git_cache().spawns.load(std::sync::atomic::Ordering::Relaxed);
-    m.git_diff_hits =
-        builder.git_cache().diff_hits.load(std::sync::atomic::Ordering::Relaxed);
-    m.git_diff_misses =
-        builder.git_cache().diff_misses.load(std::sync::atomic::Ordering::Relaxed);
-    m.worktree_hits =
-        builder.git_cache().worktree_hits.load(std::sync::atomic::Ordering::Relaxed);
-    m.worktree_misses =
-        builder.git_cache().worktree_misses.load(std::sync::atomic::Ordering::Relaxed);
-    let stats = m.stats();
-    drop(m);
-    metrics::save(&stats);
-}
-
 pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
     let under_systemd = service::under_systemd();
     if is_daemon_running() {
@@ -335,7 +318,6 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
     let feedback_lock = Arc::new(RwLock::new(feedbacks));
     let builder = Arc::new(TreeBuilder::new());
     let clients: ClientList = Arc::new(Mutex::new(Vec::new()));
-    let metrics = Arc::new(Mutex::new(Metrics::new()));
 
     info!(
         "daemon starting (timeout={}s)",
@@ -387,7 +369,6 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
         let fb_lock = feedback_lock.clone();
         let clients = clients.clone();
         let wake = wake.clone();
-        let metrics = metrics.clone();
         thread::spawn(move || {
             let mut last_mtime = std::fs::metadata(&path)
                 .ok()
@@ -413,13 +394,12 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                             if let Ok(mut f) = fb_lock.write() {
                                 *f = fb;
                             }
-                            let (bytes, _count, timings) =
+                            let (bytes, _count, _timings) =
                                 build_payload(&lock, &fb_lock, &builder);
                             if let Ok(mut d) = data.write() {
                                 *d = bytes;
                             }
                             broadcast(&data, &clients);
-                            record_metrics(&metrics, &timings, &builder);
                             wake.1.notify_all();
                         }
                         Err(e) => {
@@ -447,7 +427,6 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
         let builder = builder.clone();
         let clients = clients.clone();
         let wake = wake.clone();
-        let metrics = metrics.clone();
         thread::spawn(move || {
             let mut last_cache_save = Instant::now() - CACHE_SAVE_DEBOUNCE;
             loop {
@@ -464,7 +443,7 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     *guard = false;
                 }
                 let start = Instant::now();
-                let (bytes, _count, timings) =
+                let (bytes, _count, _timings) =
                     build_payload(&config_lock, &feedback_lock, &builder);
                 let changed = {
                     let mut d = data.write().unwrap();
@@ -477,7 +456,6 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                 };
                 if changed {
                     broadcast(&data, &clients);
-                    metrics.lock().unwrap().pushes_sent += 1;
                     if let Ok(bytes) = data.read().map(|d| d.clone())
                         && let Ok(payload) = serde_json::from_slice::<Payload>(&bytes)
                         && last_cache_save.elapsed() > CACHE_SAVE_DEBOUNCE
@@ -485,11 +463,11 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                         save_persisted_cache(&builder, &payload);
                         last_cache_save = Instant::now();
                     }
-                } else {
-                    metrics.lock().unwrap().pushes_skipped += 1;
                 }
-                record_metrics(&metrics, &timings, &builder);
-                info!("refresh in {}ms (changed={changed})", start.elapsed().as_millis());
+                info!(
+                    "refresh in {}ms (changed={changed})",
+                    start.elapsed().as_millis()
+                );
             }
         });
     }

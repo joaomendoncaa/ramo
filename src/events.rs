@@ -40,7 +40,9 @@ impl Picker {
                     self.input.remove(self.input_cursor);
                     return;
                 }
-                KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
                     self.input.insert(self.input_cursor, c);
                     self.input_cursor += 1;
                     return;
@@ -95,7 +97,9 @@ impl Picker {
                 return;
             }
             // Navigation with Ctrl
-            if key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+            {
                 match key.code {
                     KeyCode::Char('p') => {
                         self.help_move_cursor(-1);
@@ -158,7 +162,9 @@ impl Picker {
                     _ => {}
                 }
             }
-            if key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            if key.modifiers.contains(KeyModifiers::ALT)
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+            {
                 match key.code {
                     KeyCode::Char('b') => {
                         self.move_word(-1);
@@ -224,7 +230,9 @@ impl Picker {
                     self.help_clamp_cursor();
                     return;
                 }
-                KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
                     self.input.insert(self.input_cursor, c);
                     self.input_cursor += 1;
                     self.help_cursor = 0;
@@ -420,16 +428,6 @@ impl Picker {
             Action::ExitHelp => self.exit_help(),
             Action::KillSession => self.execute_kill_session(),
             Action::OpenDetached => self.open_detached(),
-            Action::MovePrevious => self.move_cursor(-1),
-            Action::MoveNext => self.move_cursor(1),
-            Action::MoveUp => self.move_cursor(5),
-            Action::MoveDown => self.move_cursor(-5),
-            Action::ResetInput => {
-                self.input.clear();
-                self.input_cursor = 0;
-                self.filter();
-            }
-            Action::Close => self.quit = true,
         }
     }
 

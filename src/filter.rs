@@ -22,10 +22,7 @@ impl Picker {
 
         let mut matched: HashSet<usize> = HashSet::new();
         for (i, e) in self.entries.iter().enumerate() {
-            if words
-                .iter()
-                .all(|w| e.search_text_lower.contains(w))
-            {
+            if words.iter().all(|w| e.search_text_lower.contains(w)) {
                 let mut cur = Some(i);
                 while let Some(idx) = cur {
                     if !matched.insert(idx) {
@@ -57,9 +54,7 @@ impl Picker {
         let best = (0..self.filtered.len())
             .filter(|&p| {
                 let e = &self.entries[self.filtered[p]];
-                words
-                    .iter()
-                    .all(|w| e.search_text_lower.contains(w))
+                words.iter().all(|w| e.search_text_lower.contains(w))
             })
             .min_by_key(|&p| (self.entries[self.filtered[p]].depth, std::cmp::Reverse(p)));
         self.cursor = best.unwrap_or(self.filtered.len() - 1);
