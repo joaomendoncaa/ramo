@@ -90,11 +90,27 @@ impl TreeBuilder {
             } else {
                 self.git_cache.diff(&dir.path)
             };
+            let raw_branch = self.git_cache.branch(&dir.path);
+            let branch = match raw_branch {
+                Some(b) if b == "master" || b == "main" => None,
+                Some(b) => {
+                    let is_active = open.contains(&dir.path);
+                    if (is_active && config.hide_hints_branches_active)
+                        || (!is_active && config.hide_hints_branches_inactive)
+                    {
+                        None
+                    } else {
+                        Some(b)
+                    }
+                }
+                None => None,
+            };
             // refresh worktree diffs already done via worktree_diffs; ensure worktree entries present
             out.push(DirGit {
                 worktrees,
                 worktree_diffs,
                 main_diff,
+                branch,
             });
         }
         out
@@ -144,6 +160,7 @@ struct DirGit {
     worktrees: Vec<WorktreeInfo>,
     worktree_diffs: HashMap<PathBuf, Changes>,
     main_diff: Changes,
+    branch: Option<String>,
 }
 
 fn build_dir_entry(
@@ -190,6 +207,7 @@ fn build_dir_entry(
         path: dir.path.clone(),
         is_open: dir_is_open(dir, sessions, panes),
         changes,
+        branch: git.branch.clone(),
         worktrees,
         worktree_diffs,
         sessions: sessions_here,
@@ -203,6 +221,7 @@ fn external_dir_entry(s: &TmuxSession, _panes: &[TmuxPane]) -> DirEntry {
         path: s.path.clone(),
         is_open: true,
         changes: Changes::default(),
+        branch: None,
         worktrees: vec![],
         worktree_diffs: vec![],
         sessions: vec![],
@@ -253,6 +272,10 @@ fn worktree_sessions(
 
 fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
     let dir_idx = rows.len();
+    let search_text = match &entry.branch {
+        Some(b) => format!("{} {}", entry.name, b),
+        None => entry.name.clone(),
+    };
     rows.push(finalize_entry(Entry {
         kind: EntryType::Dir,
         label: entry.name.clone(),
@@ -262,12 +285,13 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
         } else {
             Some(entry.changes.clone())
         },
+        branch: entry.branch.clone(),
         is_open: entry.is_open,
         is_running: false,
         depth: 0,
         ancestors: vec![],
         is_last: is_last_dir,
-        search_text: entry.name.clone(),
+        search_text,
         goto: Some(Goto {
             session: entry.name.clone(),
             path: entry.path.clone(),
@@ -291,6 +315,7 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             label: ps.session.title.clone(),
             path: ps.session.directory.clone(),
             changes: None,
+            branch: None,
             is_open: false,
             is_running: ps.session.is_running,
             depth: 1,
@@ -327,6 +352,7 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             } else {
                 Some(wt_diff.clone())
             },
+            branch: None,
             is_open: false,
             is_running: false,
             depth: 1,
@@ -351,6 +377,7 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
                 label: ps.session.title.clone(),
                 path: ps.session.directory.clone(),
                 changes: None,
+                branch: None,
                 is_open: false,
                 is_running: ps.session.is_running,
                 depth: 2,
@@ -380,6 +407,7 @@ struct DirEntry {
     path: PathBuf,
     is_open: bool,
     changes: Changes,
+    branch: Option<String>,
     worktrees: Vec<WorktreeInfo>,
     worktree_diffs: Vec<Changes>,
     sessions: Vec<PaneSession>,

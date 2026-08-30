@@ -487,6 +487,7 @@ mod tests {
             label: String::new(),
             path: PathBuf::from("/tmp"),
             changes: None,
+            branch: None,
             is_open: false,
             is_running: false,
             depth: 0,

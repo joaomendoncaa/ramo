@@ -96,6 +96,8 @@ pub struct Entry {
     pub path: PathBuf,
     #[serde(alias = "diff")]
     pub changes: Option<Changes>,
+    #[serde(default)]
+    pub branch: Option<String>,
     pub is_open: bool,
     pub is_running: bool,
     pub depth: usize,

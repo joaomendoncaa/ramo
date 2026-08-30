@@ -130,6 +130,9 @@ pub fn render(frame: &mut Frame, picker: &mut Picker) {
     let entry_text_width = if !buttons.is_empty() && cursor < n {
         let e = &picker.entries[picker.filtered[cursor]];
         let mut w = e.connector().chars().count() + 2 + e.label.chars().count();
+        if let Some(branch) = &e.branch {
+            w += 1 + branch.chars().count();
+        }
         if let Some(changes) = &e.changes
             && !changes.has_none()
         {
@@ -372,6 +375,16 @@ pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Li
         Span::styled(format!("{} ", entry.marker(spinner)), marker_style),
         Span::styled(entry.label.as_str(), label_style),
     ];
+    if let Some(branch) = &entry.branch {
+        let branch_style = if effective_dim {
+            Style::default().fg(CMD_DIM)
+        } else if is_cursor {
+            Style::default().fg(Color::White).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(format!(" {}", branch), branch_style));
+    }
     if let Some(changes) = &entry.changes
         && !changes.has_none()
     {
@@ -643,12 +656,13 @@ mod tests {
     use crate::model::{Entry, EntryType};
     use std::path::PathBuf;
 
-    fn entry(kind: EntryType, depth: usize) -> Entry {
+    fn make_entry(kind: EntryType, depth: usize) -> Entry {
         Entry {
             kind,
             label: String::new(),
             path: PathBuf::from("/tmp"),
             changes: None,
+            branch: None,
             is_open: false,
             is_running: false,
             depth,
@@ -669,7 +683,44 @@ mod tests {
     }
     #[test]
     fn gap_spine_follows_depth() {
-        assert_eq!(spine_of(&entry(EntryType::Dir, 0)), "");
-        assert_eq!(spine_of(&entry(EntryType::Worktree, 1)), "│");
+        assert_eq!(spine_of(&make_entry(EntryType::Dir, 0)), "");
+        assert_eq!(spine_of(&make_entry(EntryType::Worktree, 1)), "│");
+    }
+
+    #[test]
+    fn entry_renders_branch_and_changes() {
+        let mut e = make_entry(EntryType::Dir, 0);
+        e.label = "project8".to_string();
+        e.branch = Some("feat/whatever".to_string());
+        e.changes = Some(crate::model::Changes {
+            additions: 20,
+            deletions: 40,
+        });
+        let line = crate::renderer::entry(&e, 0, false, false);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("project8"), "label missing: {text}");
+        assert!(text.contains("feat/whatever"), "branch missing: {text}");
+        assert!(text.contains("+20"), "add missing: {text}");
+        assert!(text.contains("-40"), "del missing: {text}");
+        // branch should be hidden if None, changes also
+        let mut e2 = make_entry(EntryType::Dir, 0);
+        e2.label = "project7".to_string();
+        e2.branch = None;
+        e2.changes = None;
+        let line2 = crate::renderer::entry(&e2, 0, false, false);
+        let text2: String = line2.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!text2.contains("feat"), "unexpected branch: {text2}");
+    }
+
+    #[test]
+    fn entry_branch_hidden_when_master_filtered() {
+        // Simulate builder filtering: branch None for master/main
+        let mut e = make_entry(EntryType::Dir, 0);
+        e.label = "proj".to_string();
+        e.branch = None; // builder would have filtered master to None
+        let line = crate::renderer::entry(&e, 0, false, false);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!text.contains("master"));
+        assert!(!text.contains("main"));
     }
 }

@@ -13,16 +13,23 @@ const WORKTREE_CACHE_TTL_MS: u128 = 30_000;
 pub struct DiskCache {
     pub diffs: Vec<(PathBuf, Changes)>,
     pub worktrees: Vec<(PathBuf, Vec<WorktreeInfo>)>,
+    #[serde(default)]
+    pub branches: Vec<(PathBuf, Option<String>)>,
 }
 
 pub struct GitCache {
     diffs: Mutex<HashMap<PathBuf, (Changes, Instant)>>,
     worktrees: Mutex<HashMap<PathBuf, (Vec<WorktreeInfo>, Instant)>>,
+    branches: Mutex<HashMap<PathBuf, (Option<String>, Instant)>>,
 }
 
 impl GitCache {
     pub fn new() -> Self {
-        Self { diffs: Mutex::new(HashMap::new()), worktrees: Mutex::new(HashMap::new()) }
+        Self {
+            diffs: Mutex::new(HashMap::new()),
+            worktrees: Mutex::new(HashMap::new()),
+            branches: Mutex::new(HashMap::new()),
+        }
     }
 
     fn git_stdout(&self, path: &Path, args: &[&str]) -> Option<String> {
@@ -83,6 +90,25 @@ impl GitCache {
             .collect()
     }
 
+    fn compute_branch(&self, path: &Path) -> Option<String> {
+        if !path.join(".git").exists() {
+            return None;
+        }
+        if let Some(out) = self.git_stdout(path, &["branch", "--show-current"]) {
+            let b = out.trim();
+            if !b.is_empty() {
+                return Some(b.to_string());
+            }
+        }
+        if let Some(out) = self.git_stdout(path, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+            let b = out.trim();
+            if !b.is_empty() && b != "HEAD" {
+                return Some(b.to_string());
+            }
+        }
+        None
+    }
+
     pub fn diff(&self, path: &Path) -> Changes {
         if let Ok(c) = self.diffs.lock() {
             if let Some((v, t)) = c.get(path) {
@@ -112,6 +138,20 @@ impl GitCache {
         v
     }
 
+    pub fn branch(&self, path: &Path) -> Option<String> {
+        if let Ok(c) = self.branches.lock()
+            && let Some((v, t)) = c.get(path)
+            && t.elapsed().as_millis() < CACHE_TTL_MS
+        {
+            return v.clone();
+        }
+        let v = self.compute_branch(path);
+        if let Ok(mut c) = self.branches.lock() {
+            c.insert(path.to_path_buf(), (v.clone(), Instant::now()));
+        }
+        v
+    }
+
     pub fn load_disk(&self, cache: &DiskCache) {
         let stale = Instant::now() - Duration::from_millis((CACHE_TTL_MS + 1) as u64);
         if let Ok(mut m) = self.diffs.lock() {
@@ -125,11 +165,21 @@ impl GitCache {
                 m.insert(k.clone(), (v.clone(), stale2));
             }
         }
+        if let Ok(mut m) = self.branches.lock() {
+            for (k, v) in &cache.branches {
+                m.insert(k.clone(), (v.clone(), stale));
+            }
+        }
     }
     pub fn to_disk(&self) -> DiskCache {
         DiskCache {
             diffs: self.diffs.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default(),
             worktrees: self.worktrees.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default(),
+            branches: self
+                .branches
+                .lock()
+                .map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect())
+                .unwrap_or_default(),
         }
     }
 }
