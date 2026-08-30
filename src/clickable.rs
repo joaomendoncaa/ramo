@@ -1,8 +1,8 @@
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-pub const HOVER_BG: Color = Color::Rgb(0xff, 0x00, 0x00);
-pub const HOVER_FG: Color = Color::Rgb(0xff, 0xff, 0xff);
+pub const HOVER_BG: Color = Color::Red;
+pub const HOVER_FG: Color = Color::White;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {

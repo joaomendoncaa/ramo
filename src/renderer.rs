@@ -490,6 +490,7 @@ fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
     let mut x = hints_slot.x;
     match picker.mode {
         Mode::Help | Mode::HelpEditing => {
+            x += (" Help ".len() + 2) as u16;
             let w = 3 + " Exit Help".len();
             picker.clickables.push(Clickable {
                 rect: Rect::new(x, y, w as u16, 1),
@@ -497,8 +498,7 @@ fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
             });
         }
         Mode::Command => {
-            let skip = 1 + " Command Mode  ".len();
-            x += skip as u16;
+            x += (" Command ".len() + 2) as u16;
             let w = 3 + " Escape Command Mode".len();
             picker.clickables.push(Clickable {
                 rect: Rect::new(x, y, w as u16, 1),
@@ -535,7 +535,10 @@ fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
     match picker.mode {
         Mode::Help | Mode::HelpEditing => {
             let exit_hovered = hovered_action == Some(Action::ExitHelp);
+            let badge = Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD);
             Line::from(vec![
+                Span::styled(" Help ", badge),
+                Span::styled("  ", Style::default()),
                 Span::styled("ESC", if exit_hovered { hk } else { sk }),
                 Span::styled(" Exit Help  ", if exit_hovered { hd } else { sd }),
                 Span::styled("↑↓", sk),
@@ -547,15 +550,10 @@ fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
         Mode::Command => {
             let exit_hovered = hovered_action == Some(Action::ExitCommandMode);
             let help_hovered = hovered_action == Some(Action::HelpMode);
+            let badge = Style::default().bg(HOVER_BG).fg(HOVER_FG).add_modifier(Modifier::BOLD);
             Line::from(vec![
-                Span::styled(
-                    format!("{}", picker.config.bind_command_mode),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " Command Mode  ",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(" Command ", badge),
+                Span::styled("  ", Style::default()),
                 Span::styled("ESC", if exit_hovered { hk } else { sk }),
                 Span::styled(" Escape Command Mode  ", if exit_hovered { hd } else { sd }),
                 Span::styled(
