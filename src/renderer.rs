@@ -489,7 +489,7 @@ fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
                 action: Action::ExitCommandMode,
             });
             x += w as u16 + 2;
-            let hw = 1 + 1 + " Help".len();
+            let hw = 1 + 1 + " Help/Config".len();
             picker.clickables.push(Clickable {
                 rect: Rect::new(x, y, hw as u16, 1),
                 action: Action::HelpMode,
@@ -502,7 +502,7 @@ fn build_hints_clickables(picker: &mut Picker, hints_slot: Rect) {
                 action: Action::CommandMode,
             });
             x += first_w as u16;
-            let hw = "? Help  ".len() as u16;
+            let hw = "? Help/Config  ".len() as u16;
             picker.clickables.push(Clickable {
                 rect: Rect::new(x, y, hw, 1),
                 action: Action::HelpMode,
@@ -546,7 +546,7 @@ fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
                     format!("{}", picker.config.bind_help),
                     if help_hovered { hk } else { sk },
                 ),
-                Span::styled(" Help", if help_hovered { hd } else { sd }),
+                Span::styled(" Help/Config", if help_hovered { hd } else { sd }),
             ])
         }
         Mode::Normal => {
@@ -562,7 +562,7 @@ fn hints_line(picker: &Picker, hovered_action: Option<Action>) -> Line<'_> {
                     format!("{}", picker.config.bind_help),
                     if hovered_help { hk } else { sk },
                 ),
-                Span::styled(" Help", if hovered_help { hd } else { sd }),
+                Span::styled(" Help/Config", if hovered_help { hd } else { sd }),
             ])
         }
     }
