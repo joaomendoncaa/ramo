@@ -40,6 +40,14 @@ pub fn key_at(lines: &[String], idx: usize) -> Option<String> {
     key_at_line(&lines[idx])
 }
 
+fn inline_suffix(line: &str) -> Option<String> {
+    // return "# comment" part from "key = value # comment", preserving "#"
+    let eq_pos = line.find('=')?;
+    let after_eq = &line[eq_pos + 1..];
+    let hash_pos = after_eq.find('#')?;
+    Some(after_eq[hash_pos..].trim().to_string())
+}
+
 pub fn raw_map_from_content(content: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for line in content.lines() {
@@ -93,6 +101,9 @@ pub fn display_lines(config: &Config) -> Vec<String> {
                     return format!("{k} = {rv}");
                 }
                 if let Some(v) = config.value_string(&k) {
+                    if let Some(suf) = inline_suffix(l) {
+                        return format!("{k} = {v} {suf}");
+                    }
                     return format!("{k} = {v}");
                 }
             }
@@ -183,20 +194,20 @@ pub fn filtered_visible_lines(filter: &str, config: &Config) -> Vec<String> {
         for h in &block.header {
             out.push(h.clone());
         }
-        for (_, k) in matching_entries {
+        for (li, k) in matching_entries {
             if let Some(rv) = raw.get(&k) {
                 out.push(format!("{k} = {rv}"));
             } else if let Some(v) = config.value_string(&k) {
-                out.push(format!("{k} = {v}"));
+                // preserve inline suffix from template line if present
+                let tmpl_line = &lines[li];
+                if let Some(suf) = inline_suffix(tmpl_line) {
+                    out.push(format!("{k} = {v} {suf}"));
+                } else {
+                    out.push(format!("{k} = {v}"));
+                }
             } else {
                 // fallback to template line
-                if let Some(idx) = block
-                    .entries
-                    .iter()
-                    .position(|&x| key_at(&lines, x).as_deref() == Some(&k))
-                {
-                    out.push(lines[block.entries[idx]].clone());
-                }
+                out.push(lines[li].clone());
             }
         }
     }
@@ -205,17 +216,17 @@ pub fn filtered_visible_lines(filter: &str, config: &Config) -> Vec<String> {
 
 /// Surgical write: update only the edited key in the user's real file.
 /// - If file content is `None` (no file yet), create a minimal file with just that key.
-/// - If key exists, replace first occurrence's value (`key = <new>`). Preserve surrounding lines.
+/// - If key exists, replace first occurrence's value (`key = <new>`). Preserve surrounding lines and inline comment.
 /// - If key missing, append `key = <new>` at EOF (ensuring newline).
 pub fn surgical_write(existing: Option<&str>, key: &str, new_value: &str) -> String {
-    let new_line = format!("{key} = {new_value}");
+    let new_line_base = format!("{key} = {new_value}");
     let Some(content) = existing else {
-        return format!("{new_line}\n");
+        return format!("{new_line_base}\n");
     };
 
     // Fast path: empty file
     if content.is_empty() {
-        return format!("{new_line}\n");
+        return format!("{new_line_base}\n");
     }
 
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
@@ -227,20 +238,25 @@ pub fn surgical_write(existing: Option<&str>, key: &str, new_value: &str) -> Str
         }
         if let Some((k, _)) = trimmed.split_once('=') {
             if k.trim() == key {
-                *line = new_line.clone();
+                // preserve inline suffix from original line if any
+                if let Some(suf) = inline_suffix(line) {
+                    *line = format!("{new_line_base} {suf}");
+                } else {
+                    *line = new_line_base.clone();
+                }
                 found = true;
                 break;
             }
         } else if trimmed == key {
             // bare key without `=` -> reset case, treat as match
-            *line = new_line.clone();
+            *line = new_line_base.clone();
             found = true;
             break;
         }
     }
     if !found {
         // Ensure we append after existing content, preserving final newline semantics.
-        lines.push(new_line);
+        lines.push(new_line_base);
     }
     let mut out = lines.join("\n");
     // Preserve trailing newline if original had it or we appended.
@@ -620,5 +636,36 @@ mod tests {
             3
         );
         assert!(!visible.iter().any(|l| l.trim().starts_with('#')));
+    }
+
+    #[test]
+    fn inline_suffix_shows_in_display() {
+        let cfg = Config::default();
+        let lines = display_lines(&cfg);
+        // session-kill line has inline comment in template
+        let kill_line = lines
+            .iter()
+            .find(|l| l.contains("bind-command-session-kill"))
+            .expect("kill line should exist");
+        assert!(
+            kill_line.contains("# uses"),
+            "inline comment should be visible in display: got {:?}",
+            kill_line
+        );
+        // check via filtered as well
+        let filtered = filtered_visible_lines("session-kill", &cfg);
+        assert!(filtered.iter().any(|l| l.contains("# uses")));
+    }
+
+    #[test]
+    fn inline_suffix_stripped_for_parsing() {
+        // simulate config content with inline comment
+        let content = "bind-command-session-kill = k # my comment\n";
+        let (cfg, _) = Config::parse_content(std::path::Path::new("test"), content);
+        // binding should be just "k", not "k # comment"
+        assert_eq!(cfg.bind_command_session_kill, "k");
+        // also check that raw map still contains suffix for display via surgical?
+        let map = raw_map_from_content(content);
+        assert_eq!(map.get("bind-command-session-kill").unwrap(), "k # my comment");
     }
 }

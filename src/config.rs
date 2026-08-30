@@ -1,11 +1,80 @@
 use crate::model::{FeedbackEntry, FeedbackType};
 use crate::util;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn default_bind_help() -> char {
     '?'
+}
+fn default_bind_quit() -> String {
+    "esc,ctrl-c,ctrl-q".to_string()
+}
+fn default_bind_nav_up() -> String {
+    "up,ctrl-p".to_string()
+}
+fn default_bind_nav_down() -> String {
+    "down,ctrl-n".to_string()
+}
+fn default_bind_nav_page_up() -> String {
+    "ctrl-u".to_string()
+}
+fn default_bind_nav_page_down() -> String {
+    "ctrl-d".to_string()
+}
+fn default_bind_input_left() -> String {
+    "left".to_string()
+}
+fn default_bind_input_right() -> String {
+    "right".to_string()
+}
+fn default_bind_input_home() -> String {
+    "ctrl-a".to_string()
+}
+fn default_bind_input_end() -> String {
+    "ctrl-e".to_string()
+}
+fn default_bind_input_kill_line() -> String {
+    "ctrl-k".to_string()
+}
+fn default_bind_input_delete_word() -> String {
+    "ctrl-w".to_string()
+}
+fn default_bind_input_clear() -> String {
+    "ctrl-r".to_string()
+}
+fn default_bind_input_word_left() -> String {
+    "alt-b".to_string()
+}
+fn default_bind_input_word_right() -> String {
+    "alt-f".to_string()
+}
+fn default_bind_input_backspace() -> String {
+    "backspace".to_string()
+}
+fn default_bind_input_delete() -> String {
+    "delete".to_string()
+}
+fn default_bind_command_exit() -> String {
+    "esc,backspace".to_string()
+}
+fn default_bind_command_open_detached() -> String {
+    "o".to_string()
+}
+fn default_bind_help_enter() -> String {
+    "enter".to_string()
+}
+fn default_bind_help_exit() -> String {
+    "esc".to_string()
+}
+
+fn strip_inline_value(s: &str) -> String {
+    if let Some(idx) = s.find('#') {
+        s[..idx].trim().to_string()
+    } else {
+        s.trim().to_string()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,6 +88,46 @@ pub struct Config {
     pub bind_command_session_kill: String,
     pub bind_command_worktree_new: String,
     pub bind_command_worktree_delete: String,
+    #[serde(default = "default_bind_quit")]
+    pub bind_quit: String,
+    #[serde(default = "default_bind_nav_up")]
+    pub bind_nav_up: String,
+    #[serde(default = "default_bind_nav_down")]
+    pub bind_nav_down: String,
+    #[serde(default = "default_bind_nav_page_up")]
+    pub bind_nav_page_up: String,
+    #[serde(default = "default_bind_nav_page_down")]
+    pub bind_nav_page_down: String,
+    #[serde(default = "default_bind_input_left")]
+    pub bind_input_left: String,
+    #[serde(default = "default_bind_input_right")]
+    pub bind_input_right: String,
+    #[serde(default = "default_bind_input_home")]
+    pub bind_input_home: String,
+    #[serde(default = "default_bind_input_end")]
+    pub bind_input_end: String,
+    #[serde(default = "default_bind_input_kill_line")]
+    pub bind_input_kill_line: String,
+    #[serde(default = "default_bind_input_delete_word")]
+    pub bind_input_delete_word: String,
+    #[serde(default = "default_bind_input_clear")]
+    pub bind_input_clear: String,
+    #[serde(default = "default_bind_input_word_left")]
+    pub bind_input_word_left: String,
+    #[serde(default = "default_bind_input_word_right")]
+    pub bind_input_word_right: String,
+    #[serde(default = "default_bind_input_backspace")]
+    pub bind_input_backspace: String,
+    #[serde(default = "default_bind_input_delete")]
+    pub bind_input_delete: String,
+    #[serde(default = "default_bind_command_exit")]
+    pub bind_command_exit: String,
+    #[serde(default = "default_bind_command_open_detached")]
+    pub bind_command_open_detached: String,
+    #[serde(default = "default_bind_help_enter")]
+    pub bind_help_enter: String,
+    #[serde(default = "default_bind_help_exit")]
+    pub bind_help_exit: String,
     pub auto_close: bool,
     pub daemon_timeout: u64,
     pub hide_changes_inactive: bool,
@@ -53,6 +162,26 @@ impl Default for Config {
             bind_command_session_kill: "k".to_string(),
             bind_command_worktree_new: "n".to_string(),
             bind_command_worktree_delete: "d".to_string(),
+            bind_quit: default_bind_quit(),
+            bind_nav_up: default_bind_nav_up(),
+            bind_nav_down: default_bind_nav_down(),
+            bind_nav_page_up: default_bind_nav_page_up(),
+            bind_nav_page_down: default_bind_nav_page_down(),
+            bind_input_left: default_bind_input_left(),
+            bind_input_right: default_bind_input_right(),
+            bind_input_home: default_bind_input_home(),
+            bind_input_end: default_bind_input_end(),
+            bind_input_kill_line: default_bind_input_kill_line(),
+            bind_input_delete_word: default_bind_input_delete_word(),
+            bind_input_clear: default_bind_input_clear(),
+            bind_input_word_left: default_bind_input_word_left(),
+            bind_input_word_right: default_bind_input_word_right(),
+            bind_input_backspace: default_bind_input_backspace(),
+            bind_input_delete: default_bind_input_delete(),
+            bind_command_exit: default_bind_command_exit(),
+            bind_command_open_detached: default_bind_command_open_detached(),
+            bind_help_enter: default_bind_help_enter(),
+            bind_help_exit: default_bind_help_exit(),
             auto_close: true,
             daemon_timeout: 1800,
             hide_changes_inactive: false,
@@ -132,6 +261,26 @@ impl Config {
             "bind-command-session-kill" => Some(self.bind_command_session_kill.clone()),
             "bind-command-worktree-new" => Some(self.bind_command_worktree_new.clone()),
             "bind-command-worktree-delete" => Some(self.bind_command_worktree_delete.clone()),
+            "bind-quit" => Some(self.bind_quit.clone()),
+            "bind-nav-up" => Some(self.bind_nav_up.clone()),
+            "bind-nav-down" => Some(self.bind_nav_down.clone()),
+            "bind-nav-page-up" => Some(self.bind_nav_page_up.clone()),
+            "bind-nav-page-down" => Some(self.bind_nav_page_down.clone()),
+            "bind-input-left" => Some(self.bind_input_left.clone()),
+            "bind-input-right" => Some(self.bind_input_right.clone()),
+            "bind-input-home" => Some(self.bind_input_home.clone()),
+            "bind-input-end" => Some(self.bind_input_end.clone()),
+            "bind-input-kill-line" => Some(self.bind_input_kill_line.clone()),
+            "bind-input-delete-word" => Some(self.bind_input_delete_word.clone()),
+            "bind-input-clear" => Some(self.bind_input_clear.clone()),
+            "bind-input-word-left" => Some(self.bind_input_word_left.clone()),
+            "bind-input-word-right" => Some(self.bind_input_word_right.clone()),
+            "bind-input-backspace" => Some(self.bind_input_backspace.clone()),
+            "bind-input-delete" => Some(self.bind_input_delete.clone()),
+            "bind-command-exit" => Some(self.bind_command_exit.clone()),
+            "bind-command-open-detached" => Some(self.bind_command_open_detached.clone()),
+            "bind-help-enter" => Some(self.bind_help_enter.clone()),
+            "bind-help-exit" => Some(self.bind_help_exit.clone()),
             "auto-close" => Some(self.auto_close.to_string()),
             "daemon-timeout" => Some(self.daemon_timeout.to_string()),
             "hide-changes-inactive" => Some(self.hide_changes_inactive.to_string()),
@@ -229,6 +378,8 @@ impl Config {
                 None => (trimmed, ""),
             };
 
+            // strip inline comment after value (e.g. `k # comment` -> `k`)
+            let value = strip_inline_value(value);
             if value.is_empty() {
                 if !config.reset_field(key) {
                     feedbacks.push(FeedbackEntry {
@@ -239,7 +390,7 @@ impl Config {
                 continue;
             }
 
-            config.set_field(key, value, &mut feedbacks);
+            config.set_field(key, &value, &mut feedbacks);
         }
 
         (config, feedbacks)
@@ -292,6 +443,26 @@ impl Config {
             "bind-command-session-kill" => { self.bind_command_session_kill = value.to_string(); true }
             "bind-command-worktree-new" => { self.bind_command_worktree_new = value.to_string(); true }
             "bind-command-worktree-delete" => { self.bind_command_worktree_delete = value.to_string(); true }
+            "bind-quit" => { self.bind_quit = value.to_string(); true }
+            "bind-nav-up" => { self.bind_nav_up = value.to_string(); true }
+            "bind-nav-down" => { self.bind_nav_down = value.to_string(); true }
+            "bind-nav-page-up" => { self.bind_nav_page_up = value.to_string(); true }
+            "bind-nav-page-down" => { self.bind_nav_page_down = value.to_string(); true }
+            "bind-input-left" => { self.bind_input_left = value.to_string(); true }
+            "bind-input-right" => { self.bind_input_right = value.to_string(); true }
+            "bind-input-home" => { self.bind_input_home = value.to_string(); true }
+            "bind-input-end" => { self.bind_input_end = value.to_string(); true }
+            "bind-input-kill-line" => { self.bind_input_kill_line = value.to_string(); true }
+            "bind-input-delete-word" => { self.bind_input_delete_word = value.to_string(); true }
+            "bind-input-clear" => { self.bind_input_clear = value.to_string(); true }
+            "bind-input-word-left" => { self.bind_input_word_left = value.to_string(); true }
+            "bind-input-word-right" => { self.bind_input_word_right = value.to_string(); true }
+            "bind-input-backspace" => { self.bind_input_backspace = value.to_string(); true }
+            "bind-input-delete" => { self.bind_input_delete = value.to_string(); true }
+            "bind-command-exit" => { self.bind_command_exit = value.to_string(); true }
+            "bind-command-open-detached" => { self.bind_command_open_detached = value.to_string(); true }
+            "bind-help-enter" => { self.bind_help_enter = value.to_string(); true }
+            "bind-help-exit" => { self.bind_help_exit = value.to_string(); true }
             "auto-close" => set_bool(&mut self.auto_close, key, value, feedbacks),
             "daemon-timeout" => set_u64(&mut self.daemon_timeout, key, value, feedbacks),
             "hide-changes-inactive" => set_bool(&mut self.hide_changes_inactive, key, value, feedbacks),
@@ -325,6 +496,26 @@ impl Config {
             "bind-command-session-kill" => { self.bind_command_session_kill = d.bind_command_session_kill; true }
             "bind-command-worktree-new" => { self.bind_command_worktree_new = d.bind_command_worktree_new; true }
             "bind-command-worktree-delete" => { self.bind_command_worktree_delete = d.bind_command_worktree_delete; true }
+            "bind-quit" => { self.bind_quit = d.bind_quit; true }
+            "bind-nav-up" => { self.bind_nav_up = d.bind_nav_up; true }
+            "bind-nav-down" => { self.bind_nav_down = d.bind_nav_down; true }
+            "bind-nav-page-up" => { self.bind_nav_page_up = d.bind_nav_page_up; true }
+            "bind-nav-page-down" => { self.bind_nav_page_down = d.bind_nav_page_down; true }
+            "bind-input-left" => { self.bind_input_left = d.bind_input_left; true }
+            "bind-input-right" => { self.bind_input_right = d.bind_input_right; true }
+            "bind-input-home" => { self.bind_input_home = d.bind_input_home; true }
+            "bind-input-end" => { self.bind_input_end = d.bind_input_end; true }
+            "bind-input-kill-line" => { self.bind_input_kill_line = d.bind_input_kill_line; true }
+            "bind-input-delete-word" => { self.bind_input_delete_word = d.bind_input_delete_word; true }
+            "bind-input-clear" => { self.bind_input_clear = d.bind_input_clear; true }
+            "bind-input-word-left" => { self.bind_input_word_left = d.bind_input_word_left; true }
+            "bind-input-word-right" => { self.bind_input_word_right = d.bind_input_word_right; true }
+            "bind-input-backspace" => { self.bind_input_backspace = d.bind_input_backspace; true }
+            "bind-input-delete" => { self.bind_input_delete = d.bind_input_delete; true }
+            "bind-command-exit" => { self.bind_command_exit = d.bind_command_exit; true }
+            "bind-command-open-detached" => { self.bind_command_open_detached = d.bind_command_open_detached; true }
+            "bind-help-enter" => { self.bind_help_enter = d.bind_help_enter; true }
+            "bind-help-exit" => { self.bind_help_exit = d.bind_help_exit; true }
             "auto-close" => { self.auto_close = d.auto_close; true }
             "daemon-timeout" => { self.daemon_timeout = d.daemon_timeout; true }
             "hide-changes-inactive" => { self.hide_changes_inactive = d.hide_changes_inactive; true }
@@ -344,6 +535,92 @@ impl Config {
             "style-icon-input" => { self.style_icon_input = d.style_icon_input; true }
             "style-entries-gap" => { self.style_entries_gap = d.style_entries_gap; true }
             _ => false,
+        }
+    }
+
+    /// Check if a key event matches any of the comma-separated binds in `spec`.
+    /// Spec examples: "enter", "esc,ctrl-c", "up,ctrl-p", "alt-b", "o", "?"
+    pub fn key_matches(spec: &str, key: KeyEvent) -> bool {
+        for token in spec.split(',') {
+            let t = token.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if token_matches(t, key) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Convenience: does `key` match the bind for this config entry?
+    #[allow(dead_code)]
+    pub fn matches(&self, bind: &str, key: KeyEvent) -> bool {
+        let Some(spec) = self.value_string(bind) else {
+            return false;
+        };
+        Self::key_matches(&spec, key)
+    }
+}
+
+fn token_matches(token: &str, key: KeyEvent) -> bool {
+    let t = token.trim().to_lowercase();
+    if t.is_empty() {
+        return false;
+    }
+    // split modifiers: all parts except last are modifiers, last is key
+    let parts: Vec<&str> = t.split('-').collect();
+    let (mods, key_part) = if parts.len() == 1 {
+        (Vec::new(), parts[0])
+    } else {
+        (parts[..parts.len() - 1].to_vec(), parts[parts.len() - 1])
+    };
+    let mut need_ctrl = false;
+    let mut need_alt = false;
+    let mut need_shift = false;
+    for m in mods {
+        match m {
+            "ctrl" | "control" => need_ctrl = true,
+            "alt" => need_alt = true,
+            "shift" => need_shift = true,
+            _ => return false,
+        }
+    }
+    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+    let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    if need_ctrl != has_ctrl {
+        return false;
+    }
+    if need_alt != has_alt {
+        return false;
+    }
+    if need_shift && !has_shift {
+        return false;
+    }
+    // allow extra shift for plain keys (e.g. "?" needs shift, but we ignore if not required)
+    match key_part {
+        "enter" => key.code == KeyCode::Enter,
+        "esc" | "escape" => key.code == KeyCode::Esc,
+        "up" => key.code == KeyCode::Up,
+        "down" => key.code == KeyCode::Down,
+        "left" => key.code == KeyCode::Left,
+        "right" => key.code == KeyCode::Right,
+        "backspace" | "bs" => key.code == KeyCode::Backspace,
+        "delete" | "del" => key.code == KeyCode::Delete,
+        "tab" => key.code == KeyCode::Tab,
+        "space" => key.code == KeyCode::Char(' '),
+        _ => {
+            if key_part.chars().count() == 1 {
+                let ch = key_part.chars().next().unwrap();
+                if let KeyCode::Char(c) = key.code {
+                    c.to_ascii_lowercase() == ch
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         }
     }
 }

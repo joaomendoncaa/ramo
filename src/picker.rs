@@ -221,7 +221,8 @@ impl Picker {
             let key = self.config.bind_command_session_kill.to_uppercase();
             buttons.push((format!("{key} Kill Session"), Action::KillSession));
         } else if entry.goto.is_some() {
-            buttons.push(("O Open Detached".to_string(), Action::OpenDetached));
+            let key = self.config.bind_command_open_detached.to_uppercase();
+            buttons.push((format!("{key} Open Detached"), Action::OpenDetached));
         }
         buttons
     }
@@ -307,10 +308,12 @@ impl Picker {
         let lines = crate::help::template_lines();
         if let Some(k) = crate::help::key_at(&lines, line_idx) {
             let raw = crate::help::raw_file_map();
-            let v = raw
+            let raw_v = raw
                 .get(&k)
                 .cloned()
                 .unwrap_or_else(|| self.config.value_string(&k).unwrap_or_default());
+            // strip inline comment for editing (e.g. `k # comment` -> `k`)
+            let v = raw_v.split('#').next().unwrap_or(&raw_v).trim().to_string();
             // stash current filter
             self.help_stashed_filter = self.input.clone();
             self.help_stashed_filter_cursor = self.input_cursor;

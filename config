@@ -52,13 +52,33 @@ path-worktrees = ~/Projects/worktrees
 # be careful with defining custom bindings due to
 # modifier shenanigans, feel free to open an issue
 # if something doesn't seem right
+# bind syntax: comma-separated keys, each like "enter", "esc", "up", "down",
+# "left", "right", "backspace", "delete", "a", "?", ":" or with modifiers
+# "ctrl-p", "alt-b", "ctrl-c". Use lower-case; modifiers are ctrl/alt/shift.
 bind-jumpto = enter
 bind-command-mode = :
 bind-help = ?
-
-# uses `kill-session` in tmux, so it doesn't delete
-# your worktree or agent session
-bind-command-session-kill = k
+bind-quit = esc,ctrl-c,ctrl-q
+bind-nav-up = up,ctrl-p
+bind-nav-down = down,ctrl-n
+bind-nav-page-up = ctrl-u
+bind-nav-page-down = ctrl-d
+bind-input-left = left
+bind-input-right = right
+bind-input-home = ctrl-a
+bind-input-end = ctrl-e
+bind-input-kill-line = ctrl-k
+bind-input-delete-word = ctrl-w
+bind-input-clear = ctrl-r
+bind-input-word-left = alt-b
+bind-input-word-right = alt-f
+bind-input-backspace = backspace
+bind-input-delete = delete
+bind-command-exit = esc,backspace
+bind-command-open-detached = o
+bind-help-enter = enter
+bind-help-exit = esc
+bind-command-session-kill = k # uses `kill-session` in tmux, so it doesn't delete your worktree or agent session
 bind-command-worktree-new = n
 bind-command-worktree-delete = d
 

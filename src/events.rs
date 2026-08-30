@@ -1,4 +1,5 @@
 use crate::clickable::Action;
+use crate::config::Config;
 use crate::picker::{Mode, Picker};
 use crate::tmux;
 
@@ -8,81 +9,78 @@ impl Picker {
     pub fn handle_input(&mut self, key: KeyEvent) {
         // HelpEditing has highest priority: editing buffer
         if self.mode == Mode::HelpEditing {
-            match key.code {
-                KeyCode::Esc => {
-                    self.cancel_help_edit();
-                    return;
+            if Config::key_matches(&self.config.bind_help_exit, key) {
+                self.cancel_help_edit();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_help_enter, key) {
+                self.commit_help_edit();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_left, key) {
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
                 }
-                KeyCode::Enter => {
-                    self.commit_help_edit();
-                    return;
-                }
-                KeyCode::Left => {
-                    if self.input_cursor > 0 {
-                        self.input_cursor -= 1;
-                    }
-                    return;
-                }
-                KeyCode::Right => {
-                    if self.input_cursor < self.input.len() {
-                        self.input_cursor += 1;
-                    }
-                    return;
-                }
-                KeyCode::Backspace => {
-                    if self.input_cursor > 0 {
-                        self.input_cursor -= 1;
-                        self.input.remove(self.input_cursor);
-                    }
-                    return;
-                }
-                KeyCode::Delete if self.input_cursor < self.input.len() => {
-                    self.input.remove(self.input_cursor);
-                    return;
-                }
-                KeyCode::Char(c)
-                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    self.input.insert(self.input_cursor, c);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_right, key) {
+                if self.input_cursor < self.input.len() {
                     self.input_cursor += 1;
-                    return;
                 }
-                _ => {
-                    // allow ctrl-a/e/k/w etc for editing buffer
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        match key.code {
-                            KeyCode::Char('a') => self.input_cursor = 0,
-                            KeyCode::Char('e') => self.input_cursor = self.input.len(),
-                            KeyCode::Char('k') => {
-                                self.input.drain(self.input_cursor..);
-                            }
-                            KeyCode::Char('w') => {
-                                // delete word back in help edit buffer (no filter)
-                                let bytes = self.input.as_bytes();
-                                let mut i = self.input_cursor;
-                                while i > 0 && bytes[i - 1].is_ascii_whitespace() {
-                                    i -= 1;
-                                }
-                                while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
-                                    i -= 1;
-                                }
-                                self.input.drain(i..self.input_cursor);
-                                self.input_cursor = i;
-                            }
-                            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {}
-                            _ => {}
-                        }
-                        return;
-                    }
-                    if key.modifiers.contains(KeyModifiers::ALT) {
-                        match key.code {
-                            KeyCode::Char('b') => self.move_word(-1),
-                            KeyCode::Char('f') => self.move_word(1),
-                            _ => {}
-                        }
-                        return;
-                    }
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_backspace, key) {
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
+                    self.input.remove(self.input_cursor);
                 }
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_delete, key) && self.input_cursor < self.input.len() {
+                self.input.remove(self.input_cursor);
+                return;
+            }
+            // input editing bindings
+            if Config::key_matches(&self.config.bind_input_home, key) {
+                self.input_cursor = 0;
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_end, key) {
+                self.input_cursor = self.input.len();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_kill_line, key) {
+                self.input.drain(self.input_cursor..);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_delete_word, key) {
+                let bytes = self.input.as_bytes();
+                let mut i = self.input_cursor;
+                while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                self.input.drain(i..self.input_cursor);
+                self.input_cursor = i;
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_word_left, key) {
+                self.move_word(-1);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_word_right, key) {
+                self.move_word(1);
+                return;
+            }
+            // char insertion
+            if let KeyCode::Char(c) = key.code
+                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            {
+                self.input.insert(self.input_cursor, c);
+                self.input_cursor += 1;
+                return;
             }
             return;
         }
@@ -96,151 +94,125 @@ impl Picker {
             {
                 return;
             }
-            // Navigation with Ctrl
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && !key.modifiers.contains(KeyModifiers::ALT)
-            {
-                match key.code {
-                    KeyCode::Char('p') => {
-                        self.help_move_cursor(-1);
-                        return;
-                    }
-                    KeyCode::Char('n') => {
-                        self.help_move_cursor(1);
-                        return;
-                    }
-                    KeyCode::Char('u') => {
-                        self.help_move_cursor(-5);
-                        return;
-                    }
-                    KeyCode::Char('d') => {
-                        self.help_move_cursor(5);
-                        return;
-                    }
-                    KeyCode::Char('a') => {
-                        self.input_cursor = 0;
-                        return;
-                    }
-                    KeyCode::Char('e') => {
-                        self.input_cursor = self.input.len();
-                        return;
-                    }
-                    KeyCode::Char('k') => {
-                        self.input.drain(self.input_cursor..);
-                        self.help_cursor = 0;
-                        self.help_scroll = 0;
-                        self.help_clamp_cursor();
-                        return;
-                    }
-                    KeyCode::Char('w') => {
-                        let bytes = self.input.as_bytes();
-                        let mut i = self.input_cursor;
-                        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
-                            i -= 1;
-                        }
-                        while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
-                            i -= 1;
-                        }
-                        self.input.drain(i..self.input_cursor);
-                        self.input_cursor = i;
-                        self.help_cursor = 0;
-                        self.help_scroll = 0;
-                        self.help_clamp_cursor();
-                        return;
-                    }
-                    KeyCode::Char('r') => {
-                        self.input.clear();
-                        self.input_cursor = 0;
-                        self.help_cursor = 0;
-                        self.help_scroll = 0;
-                        return;
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('q') => {
-                        self.quit = true;
-                        return;
-                    }
-                    _ => {}
-                }
+            if Config::key_matches(&self.config.bind_nav_up, key) {
+                self.help_move_cursor(-1);
+                return;
             }
-            if key.modifiers.contains(KeyModifiers::ALT)
-                && !key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                match key.code {
-                    KeyCode::Char('b') => {
-                        self.move_word(-1);
-                        return;
-                    }
-                    KeyCode::Char('f') => {
-                        self.move_word(1);
-                        return;
-                    }
-                    _ => {}
-                }
+            if Config::key_matches(&self.config.bind_nav_down, key) {
+                self.help_move_cursor(1);
+                return;
             }
-            match key.code {
-                KeyCode::Up => {
-                    self.help_move_cursor(-1);
+            if Config::key_matches(&self.config.bind_nav_page_up, key) {
+                self.help_move_cursor(-5);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_nav_page_down, key) {
+                self.help_move_cursor(5);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_home, key) {
+                self.input_cursor = 0;
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_end, key) {
+                self.input_cursor = self.input.len();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_kill_line, key) {
+                self.input.drain(self.input_cursor..);
+                self.help_cursor = 0;
+                self.help_scroll = 0;
+                self.help_clamp_cursor();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_delete_word, key) {
+                let bytes = self.input.as_bytes();
+                let mut i = self.input_cursor;
+                while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                self.input.drain(i..self.input_cursor);
+                self.input_cursor = i;
+                self.help_cursor = 0;
+                self.help_scroll = 0;
+                self.help_clamp_cursor();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_help_exit, key) {
+                if !self.input.is_empty() {
+                    self.input.clear();
+                    self.input_cursor = 0;
+                    self.help_cursor = 0;
+                    self.help_scroll = 0;
                     return;
                 }
-                KeyCode::Down => {
-                    self.help_move_cursor(1);
-                    return;
+                self.exit_help();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_clear, key) {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.help_cursor = 0;
+                self.help_scroll = 0;
+                return;
+            }
+            if Config::key_matches(&self.config.bind_quit, key) {
+                self.quit = true;
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_word_left, key) {
+                self.move_word(-1);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_word_right, key) {
+                self.move_word(1);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_help_enter, key) {
+                self.start_help_edit();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_left, key) {
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
                 }
-                KeyCode::Esc => {
-                    if !self.input.is_empty() {
-                        self.input.clear();
-                        self.input_cursor = 0;
-                        self.help_cursor = 0;
-                        self.help_scroll = 0;
-                        return;
-                    }
-                    self.exit_help();
-                    return;
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_right, key) {
+                if self.input_cursor < self.input.len() {
+                    self.input_cursor += 1;
                 }
-                KeyCode::Enter => {
-                    self.start_help_edit();
-                    return;
-                }
-                KeyCode::Left => {
-                    if self.input_cursor > 0 {
-                        self.input_cursor -= 1;
-                    }
-                    return;
-                }
-                KeyCode::Right => {
-                    if self.input_cursor < self.input.len() {
-                        self.input_cursor += 1;
-                    }
-                    return;
-                }
-                KeyCode::Backspace => {
-                    if self.input_cursor > 0 {
-                        self.input_cursor -= 1;
-                        self.input.remove(self.input_cursor);
-                        self.help_cursor = 0;
-                        self.help_scroll = 0;
-                        self.help_clamp_cursor();
-                    }
-                    return;
-                }
-                KeyCode::Delete if self.input_cursor < self.input.len() => {
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_backspace, key) {
+                if self.input_cursor > 0 {
+                    self.input_cursor -= 1;
                     self.input.remove(self.input_cursor);
                     self.help_cursor = 0;
                     self.help_scroll = 0;
                     self.help_clamp_cursor();
-                    return;
                 }
-                KeyCode::Char(c)
-                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    self.input.insert(self.input_cursor, c);
-                    self.input_cursor += 1;
-                    self.help_cursor = 0;
-                    self.help_scroll = 0;
-                    self.help_clamp_cursor();
-                    return;
-                }
-                _ => {}
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_delete, key) && self.input_cursor < self.input.len() {
+                self.input.remove(self.input_cursor);
+                self.help_cursor = 0;
+                self.help_scroll = 0;
+                self.help_clamp_cursor();
+                return;
+            }
+            if let KeyCode::Char(c) = key.code
+                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            {
+                self.input.insert(self.input_cursor, c);
+                self.input_cursor += 1;
+                self.help_cursor = 0;
+                self.help_scroll = 0;
+                self.help_clamp_cursor();
+                return;
             }
             return;
         }
@@ -255,36 +227,35 @@ impl Picker {
                 self.enter_help();
                 return;
             }
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                match key.code {
-                    KeyCode::Char('p') => {
-                        self.move_cursor(-1);
-                        return;
-                    }
-                    KeyCode::Char('n') => {
-                        self.move_cursor(1);
-                        return;
-                    }
-                    KeyCode::Char('u') => {
-                        self.move_cursor(-5);
-                        return;
-                    }
-                    KeyCode::Char('d') => {
-                        self.move_cursor(5);
-                        return;
-                    }
-                    KeyCode::Char('r') => {
-                        self.input.clear();
-                        self.input_cursor = 0;
-                        self.filter();
-                        return;
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('q') => {
-                        self.quit = true;
-                        return;
-                    }
-                    _ => {}
-                }
+            if Config::key_matches(&self.config.bind_nav_up, key) {
+                self.move_cursor(-1);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_nav_down, key) {
+                self.move_cursor(1);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_nav_page_up, key) {
+                self.move_cursor(-5);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_nav_page_down, key) {
+                self.move_cursor(5);
+                return;
+            }
+            if Config::key_matches(&self.config.bind_input_clear, key) {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.filter();
+                return;
+            }
+            if Config::key_matches(&self.config.bind_command_exit, key) {
+                self.mode = Mode::Normal;
+                return;
+            }
+            if Config::key_matches(&self.config.bind_quit, key) {
+                self.quit = true;
+                return;
             }
             self.handle_command_key(key);
             return;
@@ -309,17 +280,56 @@ impl Picker {
             return;
         }
 
-        if key.modifiers.contains(KeyModifiers::ALT)
-            && !key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            self.handle_mod_alt(key);
+        if Config::key_matches(&self.config.bind_input_word_left, key) {
+            self.move_word(-1);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_word_right, key) {
+            self.move_word(1);
             return;
         }
 
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.contains(KeyModifiers::ALT)
-            && self.handle_mod_ctrl(key)
-        {
+        if Config::key_matches(&self.config.bind_nav_up, key) {
+            self.move_cursor(-1);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_nav_down, key) {
+            self.move_cursor(1);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_nav_page_up, key) {
+            self.move_cursor(-5);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_nav_page_down, key) {
+            self.move_cursor(5);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_quit, key) {
+            self.quit = true;
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_home, key) {
+            self.input_cursor = 0;
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_end, key) {
+            self.input_cursor = self.input.len();
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_kill_line, key) {
+            self.input.drain(self.input_cursor..);
+            self.filter();
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_delete_word, key) {
+            self.delete_word_back();
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_clear, key) {
+            self.input.clear();
+            self.input_cursor = 0;
+            self.filter();
             return;
         }
 
@@ -392,17 +402,25 @@ impl Picker {
     }
 
     fn handle_command_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Backspace => {
-                self.mode = Mode::Normal;
-            }
-            KeyCode::Char('k') => {
-                self.execute_kill_session();
-            }
-            KeyCode::Char('o') => {
-                self.open_detached();
-            }
-            _ => {}
+        if Config::key_matches(&self.config.bind_command_exit, key) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if Config::key_matches(&self.config.bind_command_session_kill, key) {
+            self.execute_kill_session();
+            return;
+        }
+        if Config::key_matches(&self.config.bind_command_open_detached, key) {
+            self.open_detached();
+            return;
+        }
+        if Config::key_matches(&self.config.bind_command_worktree_new, key) {
+            // TODO: worktree new not yet implemented, placeholder
+            return;
+        }
+        if Config::key_matches(&self.config.bind_command_worktree_delete, key) {
+            // TODO: worktree delete not yet implemented
+            return;
         }
     }
 
@@ -431,77 +449,54 @@ impl Picker {
         }
     }
 
-    fn handle_mod_alt(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('b') => self.move_word(-1),
-            KeyCode::Char('f') => self.move_word(1),
-            _ => {}
-        }
-    }
-
-    // Returns true if the key was handled (caller should stop).
-    fn handle_mod_ctrl(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Char('p') => self.move_cursor(-1),
-            KeyCode::Char('n') => self.move_cursor(1),
-            KeyCode::Char('u') => {
-                self.move_cursor(-5);
-            }
-            KeyCode::Char('d') => {
-                self.move_cursor(5);
-            }
-            KeyCode::Char('c') | KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('a') => self.input_cursor = 0,
-            KeyCode::Char('e') => self.input_cursor = self.input.len(),
-
-            KeyCode::Char('k') => {
-                self.input.drain(self.input_cursor..);
-                self.filter();
-            }
-            KeyCode::Char('w') => self.delete_word_back(),
-            KeyCode::Char('r') => {
-                self.input.clear();
-                self.input_cursor = 0;
-                self.filter();
-            }
-            _ => return false,
-        }
-        true
-    }
-
     fn handle_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Up => self.move_cursor(-1),
-            KeyCode::Down => self.move_cursor(1),
-            KeyCode::Enter => self.goto(),
-            KeyCode::Esc => self.quit = true,
-            KeyCode::Left => {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                }
+        if Config::key_matches(&self.config.bind_nav_up, key) {
+            self.move_cursor(-1);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_nav_down, key) {
+            self.move_cursor(1);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_jumpto, key) {
+            self.goto();
+            return;
+        }
+        if Config::key_matches(&self.config.bind_quit, key) {
+            self.quit = true;
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_left, key) {
+            if self.input_cursor > 0 {
+                self.input_cursor -= 1;
             }
-            KeyCode::Right => {
-                if self.input_cursor < self.input.len() {
-                    self.input_cursor += 1;
-                }
-            }
-            KeyCode::Char(c) => {
-                self.input.insert(self.input_cursor, c);
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_right, key) {
+            if self.input_cursor < self.input.len() {
                 self.input_cursor += 1;
-                self.filter();
             }
-            KeyCode::Backspace => {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    self.input.remove(self.input_cursor);
-                    self.filter();
-                }
-            }
-            KeyCode::Delete if self.input_cursor < self.input.len() => {
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_backspace, key) {
+            if self.input_cursor > 0 {
+                self.input_cursor -= 1;
                 self.input.remove(self.input_cursor);
                 self.filter();
             }
-            _ => {}
+            return;
+        }
+        if Config::key_matches(&self.config.bind_input_delete, key) && self.input_cursor < self.input.len() {
+            self.input.remove(self.input_cursor);
+            self.filter();
+            return;
+        }
+        if let KeyCode::Char(c) = key.code
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+        {
+            self.input.insert(self.input_cursor, c);
+            self.input_cursor += 1;
+            self.filter();
         }
     }
 
@@ -679,5 +674,53 @@ impl Picker {
         }
         let rows = self.help_rows();
         rows.get(line_idx).copied().flatten()
+    }
+}
+
+#[cfg(test)]
+mod esc_tests {
+    use crate::config::Config;
+    use crate::model::Payload;
+    use crate::picker::{Mode, Picker};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn esc() -> KeyEvent {
+        KeyEvent { code: KeyCode::Esc, modifiers: KeyModifiers::empty(), kind: KeyEventKind::Press, state: KeyEventState::empty() }
+    }
+
+    #[test]
+    fn esc_in_command_exits_not_quits() {
+        let mut p = Picker::new(Payload { entries: vec![], config: Config::default(), feedbacks: vec![], entries_found: 0 });
+        p.mode = Mode::Command;
+        p.handle_input(esc());
+        assert_eq!(p.mode, Mode::Normal);
+        assert!(!p.quit);
+        // second esc in Normal should quit
+        p.handle_input(esc());
+        assert!(p.quit);
+    }
+
+    #[test]
+    fn esc_in_help_exits_not_quits() {
+        let mut p = Picker::new(Payload { entries: vec![], config: Config::default(), feedbacks: vec![], entries_found: 0 });
+        p.enter_help();
+        assert_eq!(p.mode, Mode::Help);
+        p.handle_input(esc());
+        assert_eq!(p.mode, Mode::Normal);
+        assert!(!p.quit);
+    }
+
+    #[test]
+    fn esc_in_help_with_filter_clears_first() {
+        let mut p = Picker::new(Payload { entries: vec![], config: Config::default(), feedbacks: vec![], entries_found: 0 });
+        p.enter_help();
+        p.input = "foo".to_string();
+        p.input_cursor = 3;
+        p.handle_input(esc());
+        assert_eq!(p.mode, Mode::Help);
+        assert!(p.input.is_empty());
+        assert!(!p.quit);
+        p.handle_input(esc());
+        assert_eq!(p.mode, Mode::Normal);
     }
 }

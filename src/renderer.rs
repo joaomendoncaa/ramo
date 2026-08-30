@@ -271,7 +271,7 @@ fn render_help(frame: &mut Frame, picker: &mut Picker) {
         let raw = &display_lines[idx];
         let is_cursor = idx == cursor_line;
         let is_selectable = rows[idx].is_some();
-        let style = if is_cursor {
+        let base_style = if is_cursor {
             Style::default().bg(CURSOR_BG).fg(Color::White)
         } else if !is_selectable {
             Style::default()
@@ -280,7 +280,34 @@ fn render_help(frame: &mut Frame, picker: &mut Picker) {
         } else {
             Style::default()
         };
-        lines.push(Line::from(vec![Span::styled(raw.as_str(), style)]));
+        // inline `# comment` is virtual: dimmed, not part of selectable content, no cursor bg
+        if is_selectable {
+            if let Some(hash_idx) = raw.find(" #") {
+                let (main, suffix) = raw.split_at(hash_idx);
+                let suffix_style = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM);
+                lines.push(Line::from(vec![
+                    Span::styled(main, base_style),
+                    Span::styled(suffix, suffix_style),
+                ]));
+            } else if let Some(hash_idx) = raw.find('#') {
+                // fallback: `k#` without space
+                let (main, suffix) = raw.split_at(hash_idx);
+                let main = main.trim_end();
+                let suffix_style = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM);
+                lines.push(Line::from(vec![
+                    Span::styled(main, base_style),
+                    Span::styled(format!(" {}", suffix.trim()), suffix_style),
+                ]));
+            } else {
+                lines.push(Line::from(vec![Span::styled(raw.as_str(), base_style)]));
+            }
+        } else {
+            lines.push(Line::from(vec![Span::styled(raw.as_str(), base_style)]));
+        }
     }
     while lines.len() < slot_entries_height {
         lines.push(Line::raw(""));
