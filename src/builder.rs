@@ -403,24 +403,103 @@ struct PaneSession {
     session: Opencode,
 }
 
+fn titles_match(p: &TmuxPane, s: &Opencode) -> bool {
+    let title = &s.title;
+    if title.len() < 10 {
+        return false;
+    }
+    let t = title.to_lowercase();
+    let pt = p
+        .pane_title
+        .to_lowercase()
+        .trim_start_matches("oc | ")
+        .trim_end_matches('…')
+        .trim_end_matches("...")
+        .trim()
+        .to_string();
+    let wn = p
+        .window_name
+        .to_lowercase()
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim_end_matches('…')
+        .trim_end_matches("...")
+        .trim()
+        .to_string();
+    let matched = (pt.len() >= 10 && t.contains(&pt)) || (wn.len() >= 10 && t.contains(&wn));
+    if !matched {
+        return false;
+    }
+    // Avoid flash: new window with stale old title. Require recency.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(s.time_updated);
+    let win_ms = p.window_activity * 1000;
+    if (now_ms - win_ms).abs() < 2000 && (now_ms - s.time_updated).abs() > 10000 {
+        return false;
+    }
+    true
+}
+
+fn synthetic(p: &TmuxPane) -> Opencode {
+    Opencode {
+        id: format!("synthetic:{}:{}:{}", p.session_name, p.window_index, p.pane_index),
+        title: "New session".into(),
+        directory: p.current_path.clone(),
+        time_updated: p.activity,
+        is_running: false,
+    }
+}
+
 fn match_panes_to_sessions(panes: &[&TmuxPane], sessions: &[Opencode]) -> Vec<PaneSession> {
-    let mut used: HashSet<String> = HashSet::new();
-    let mut sorted: Vec<&TmuxPane> = panes.to_vec();
+    let mut used = HashSet::new();
+    let mut sorted = panes.to_vec();
     sorted.sort_by_key(|b| std::cmp::Reverse(b.activity));
-    sorted
-        .into_iter()
-        .filter_map(|pane| {
-            let best = sessions
-                .iter()
-                .filter(|s| !used.contains(&s.id) && is_in(&pane.current_path, &s.directory))
-                .max_by_key(|s| s.time_updated)?;
-            used.insert(best.id.clone());
-            Some(PaneSession {
-                pane: pane.clone(),
-                session: best.clone(),
-            })
-        })
-        .collect()
+    let mut out = Vec::new();
+    for p in &sorted {
+        if let Some(s) = sessions
+            .iter()
+            .filter(|s| !used.contains(&s.id) && titles_match(p, s))
+            .max_by_key(|s| s.time_updated)
+        {
+            used.insert(s.id.clone());
+            out.push(PaneSession {
+                pane: (*p).clone(),
+                session: s.clone(),
+            });
+        }
+    }
+    for p in &sorted {
+        if out.iter().any(|x| {
+            x.pane.session_name == p.session_name
+                && x.pane.window_index == p.window_index
+                && x.pane.pane_index == p.pane_index
+        }) {
+            continue;
+        }
+        if p.pane_title == "OpenCode" {
+            out.push(PaneSession {
+                pane: (*p).clone(),
+                session: synthetic(p),
+            });
+        } else if let Some(s) = sessions
+            .iter()
+            .filter(|s| !used.contains(&s.id) && is_in(&p.current_path, &s.directory))
+            .max_by_key(|s| s.time_updated)
+        {
+            used.insert(s.id.clone());
+            out.push(PaneSession {
+                pane: (*p).clone(),
+                session: s.clone(),
+            });
+        } else {
+            out.push(PaneSession {
+                pane: (*p).clone(),
+                session: synthetic(p),
+            });
+        }
+    }
+    out
 }
 fn is_in(path: &Path, base: &Path) -> bool {
     path == base || path.starts_with(base)
