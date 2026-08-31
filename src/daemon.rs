@@ -289,18 +289,19 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
         config_lock.read().unwrap().daemon_timeout
     );
 
-    // Serve the last-known state instantly; git caches are warmed from disk,
-    // then a background build reconciles with reality.
-    let mut initial_entries = Vec::new();
-    let mut initial_count = 0usize;
+    // Warm git caches from disk but start with empty entries — empty
+    // is preferable to stale. First client sees the loader until the
+    // first fresh build completes, then the refresh thread broadcasts.
+    let initial_entries: Vec<Entry> = Vec::new();
+    let initial_count = 0usize;
     if let Some(cache) = load_persisted_cache() {
         builder.load_disk_cache(&cache.git);
-        initial_entries = cache.entries;
-        initial_count = cache.entries_found;
         info!(
-            "disk cache loaded ({} entries, {} diffs)",
-            initial_entries.len(),
-            cache.git.diffs.len()
+            "disk cache loaded ({} diffs, {} branches, {} worktrees) — ignoring {} stale entries",
+            cache.git.diffs.len(),
+            cache.git.branches.len(),
+            cache.git.worktrees.len(),
+            cache.entries.len()
         );
     } else {
         info!("no disk cache, cold start");
