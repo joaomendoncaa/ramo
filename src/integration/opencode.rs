@@ -11,19 +11,21 @@ const PLUGIN_ASSETS: &[(&str, &str)] = &[
 ];
 
 pub fn sessions(ignored_agents: &[String]) -> Option<Vec<Opencode>> {
-    let arr = api("v2.session.list", &["--param", "limit=500"])?
+    let list = api("session.list", &["--param", "limit=500"])?
         .get("data")?
         .as_array()?
         .clone();
-    let active: HashSet<String> = api("v2.session.active", &[])
+
+    let active: HashSet<String> = api("session.active", &[])
         .and_then(|v| {
             v.get("data")?
                 .as_object()
                 .map(|m| m.keys().cloned().collect())
         })
         .unwrap_or_default();
+
     Some(
-        arr.iter()
+        list.iter()
             .filter_map(|item| parse_session(item, &active, ignored_agents))
             .collect(),
     )
@@ -32,7 +34,6 @@ pub fn sessions(ignored_agents: &[String]) -> Option<Vec<Opencode>> {
 pub fn plugin_install() -> Result<(), String> {
     let dir = plugin_config_dir();
     let pkg = dir.join(PLUGIN_DIRNAME);
-
     plugin_write_assets(&pkg)?;
     plugin_register(&dir, &pkg)
 }
@@ -40,10 +41,12 @@ pub fn plugin_install() -> Result<(), String> {
 fn api(method: &str, params: &[&str]) -> Option<serde_json::Value> {
     let mut args = vec!["api", method];
     args.extend(params);
+
     let out = Command::new("opencode2").args(&args).output().ok()?;
     if !out.status.success() {
         return None;
     }
+
     serde_json::from_slice(&out.stdout).ok()
 }
 
