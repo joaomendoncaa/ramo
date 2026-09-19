@@ -74,10 +74,13 @@ fn main() -> io::Result<()> {
         match picker.tick() {
             picker::Signal::Close => break,
             picker::Signal::Goto(goto) => {
-                if tmux::is_current_session(goto.session.clone()) {
-                    if let (Some(window), Some(pane)) = (goto.window, goto.pane) {
-                        tmux::select_pane(&goto.session, window, pane);
-                    }
+                if tmux::is_current_session(&goto.session) {
+                    tmux::select_agent_pane(
+                        &tmux::resolve_session(&goto.session),
+                        goto.window,
+                        goto.pane,
+                        goto.pane_id.as_deref(),
+                    );
                 } else {
                     tmux::goto(&goto);
                 }

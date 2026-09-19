@@ -97,16 +97,39 @@ pub fn list_external_sessions(
         .collect()
 }
 
+// tmux rejects `:`/`.` in new session names, so ramo-created sessions
+// live under the sanitized name. Pre-existing external sessions keep
+// their raw name — resolve to whichever actually exists so we never
+// shadow a live session with an empty duplicate.
+pub fn sanitize_session(name: &str) -> String {
+    name.replace([':', '.'], "_")
+}
+
+pub fn resolve_session(name: &str) -> String {
+    if has_session(name) {
+        name.to_string()
+    } else {
+        sanitize_session(name)
+    }
+}
+
+// `=name` forces an exact session match so raw names containing
+// `:`/`.` aren't parsed as window/pane separators.
+fn exact(session: &str) -> String {
+    format!("={session}")
+}
+
 pub fn goto(action: &Goto) {
     let Goto {
         session,
         path,
         window,
         pane,
+        pane_id,
     } = action;
 
-    let sanitized = session.replace([':', '.'], "_");
-    if !has_session(&sanitized) && !new_session(&sanitized, path) {
+    let target = resolve_session(session);
+    if !has_session(&target) && !new_session(&target, path) {
         let _ = Command::new("tmux")
             .args([
                 "display-message",
@@ -116,36 +139,97 @@ pub fn goto(action: &Goto) {
             .status();
         return;
     }
-    switch_client(&sanitized);
-    if let (Some(window), Some(pane)) = (window, pane) {
-        select_pane(session, *window, *pane);
-    }
+    switch_client(&target);
+    select_agent_pane(&target, *window, *pane, pane_id.as_deref());
 }
 
 pub fn open_detached(action: &Goto) {
     let Goto { session, path, .. } = action;
-    let sanitized = session.replace([':', '.'], "_");
-    if !has_session(&sanitized) {
-        new_session(&sanitized, path);
+    let target = resolve_session(session);
+    if !has_session(&target) {
+        new_session(&target, path);
+    }
+}
+
+// Coordinates go stale between list-build and Enter (panes open/close
+// while agents work, shifting window/pane indexes). `%id` is stable for
+// the pane's lifetime, so re-resolve the live coordinates from it at
+// goto time; fall back to the stored ones when unknown or dead.
+pub(crate) fn fresh_target(
+    session: &str,
+    window: Option<usize>,
+    pane: Option<usize>,
+    pane_id: Option<&str>,
+) -> (String, Option<usize>, Option<usize>) {
+    let Some(id) = pane_id.filter(|s| !s.is_empty()) else {
+        return (session.to_string(), window, pane);
+    };
+    let out = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            id,
+            "-F",
+            "#{session_name}\t#{window_index}\t#{pane_index}",
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let f: Vec<&str> = out.split('\t').collect();
+    if f.len() == 3 && !f[0].is_empty()
+        && let (Ok(w), Ok(p)) = (f[1].parse(), f[2].parse())
+    {
+        return (f[0].to_string(), Some(w), Some(p));
+    }
+    (session.to_string(), window, pane)
+}
+
+// `%id` is stable for the pane's lifetime; indexes shift when panes
+// open/close between list-build and click, so prefer it when known.
+// `select-pane` alone leaves the attached client on its current window,
+// so the target window is selected first in both paths.
+pub fn select_agent_pane(
+    session: &str,
+    window: Option<usize>,
+    pane: Option<usize>,
+    pane_id: Option<&str>,
+) {
+    let (session, window, pane) = fresh_target(session, window, pane, pane_id);
+    if let Some(window) = window {
+        let _ = Command::new("tmux")
+            .args(["select-window", "-t", &format!("={session}:{window}")])
+            .stderr(Stdio::null())
+            .status();
+    }
+    if let Some(id) = pane_id.filter(|s| !s.is_empty()) {
+        let _ = Command::new("tmux")
+            .args(["select-pane", "-t", id])
+            .stderr(Stdio::null())
+            .status();
+        return;
+    }
+    if let (Some(window), Some(pane)) = (window, pane) {
+        select_pane(&session, window, pane);
     }
 }
 
 pub fn select_pane(session: &str, window: usize, pane: usize) {
     let _ = Command::new("tmux")
-        .args(["select-window", "-t", &format!("{}:{}", session, window)])
+        .args(["select-window", "-t", &format!("={}:{}", session, window)])
         .stderr(Stdio::null())
         .status();
     let _ = Command::new("tmux")
         .args([
             "select-pane",
             "-t",
-            &format!("{}:{}.{}", session, window, pane),
+            &format!("={}:{}.{}", session, window, pane),
         ])
         .stderr(Stdio::null())
         .status();
 }
 
-pub fn is_current_session(name: String) -> bool {
+pub fn is_current_session(name: &str) -> bool {
     Command::new("tmux")
         .args(["display-message", "-p", "#{session_name}"])
         .output()
@@ -189,7 +273,7 @@ fn switch_client(name: &str) {
     };
     for _ in 0..3 {
         let ok = Command::new("tmux")
-            .args([cmd, "-t", name])
+            .args([cmd, "-t", &exact(name)])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -202,14 +286,40 @@ fn switch_client(name: &str) {
 
 pub fn kill_session(name: &str) {
     let _ = Command::new("tmux")
-        .args(["kill-session", "-t", name])
+        .args(["kill-session", "-t", &exact(name)])
         .stderr(Stdio::null())
         .status();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Dead/unknown pane id: no tmux lookup succeeds, stored coords win.
+    #[test]
+    fn fresh_target_falls_back_when_pane_dead() {
+        let (s, w, p) = fresh_target("sess", Some(3), Some(1), Some("%999999"));
+        assert_eq!((s.as_str(), w, p), ("sess", Some(3), Some(1)));
+        let (s, w, p) = fresh_target("sess", Some(3), Some(1), None);
+        assert_eq!((s.as_str(), w, p), ("sess", Some(3), Some(1)));
+    }
+}
+
 pub fn kill_window(session: &str, window: usize) {
     let _ = Command::new("tmux")
-        .args(["kill-window", "-t", &format!("{}:{}", session, window)])
+        .args(["kill-window", "-t", &format!("={}:{}", session, window)])
         .stderr(Stdio::null())
         .status();
+}
+
+// Agent kill with live coordinates: a stored window index may have
+// shifted since list-build, and killing the wrong window is worse
+// than jumping to it.
+pub fn kill_agent(session: &str, window: Option<usize>, pane_id: Option<&str>) {
+    let (session, window, _) = fresh_target(session, window, None, pane_id);
+    if let Some(w) = window {
+        kill_window(&session, w);
+    } else {
+        kill_session(&session);
+    }
 }

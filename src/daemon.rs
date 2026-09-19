@@ -66,6 +66,20 @@ fn cache_path() -> PathBuf {
     logs::state_dir().join("cache.json")
 }
 
+fn payload_path() -> PathBuf {
+    logs::state_dir().join("payload.json")
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) {
+    if path.parent().is_some_and(|d| std::fs::create_dir_all(d).is_err()) {
+        return;
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
 fn load_persisted_cache() -> Option<PersistedCache> {
     let bytes = std::fs::read(cache_path()).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -75,16 +89,26 @@ fn save_persisted_cache(builder: &TreeBuilder) {
     let cache = PersistedCache {
         git: builder.to_disk_cache(),
     };
-    let path = cache_path();
-    let Some(dir) = path.parent() else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(dir);
-    let tmp = path.with_extension("json.tmp");
     if let Ok(bytes) = serde_json::to_vec(&cache) {
-        let _ = std::fs::write(&tmp, bytes);
-        let _ = std::fs::rename(&tmp, path);
+        write_atomic(&cache_path(), &bytes);
     }
+}
+
+fn save_persisted_payload(bytes: &[u8]) {
+    write_atomic(&payload_path(), bytes);
+}
+
+// Last-known entries so a cold daemon serves instantly instead of the
+// loader. Current config/feedbacks win; entries refresh on next build.
+fn load_persisted_payload(config: &Config, feedbacks: &[FeedbackEntry]) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(payload_path()).ok()?;
+    let mut payload: Payload = serde_json::from_slice(&bytes).ok()?;
+    if payload.entries.is_empty() {
+        return None;
+    }
+    payload.config = config.clone();
+    payload.feedbacks = feedbacks.to_vec();
+    serde_json::to_vec(&payload).ok()
 }
 
 pub fn print_daemon_info() {
@@ -288,12 +312,9 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
         config_lock.read().unwrap().daemon_timeout
     );
 
-    // Start with empty entries — empty is preferable to stale. The first
-    // client sees the loader until the first fresh build completes, then
-    // the refresh thread broadcasts. Git caches are warmed from disk so
-    // that first build is fast (entries themselves are never persisted).
-    let initial_entries: Vec<Entry> = Vec::new();
-    let initial_count = 0usize;
+    // Serve last-known entries instantly — empty only on first-ever
+    // run. Git caches are warmed from disk so the first rebuild is
+    // fast, and the refresh thread replaces entries on next build.
     if let Some(cache) = load_persisted_cache() {
         builder.load_disk_cache(&cache.git);
         info!(
@@ -310,12 +331,10 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
             config_lock.read().unwrap().clone(),
             feedback_lock.read().unwrap().clone(),
         );
-        Arc::new(RwLock::new(serialize_payload(
-            initial_entries,
-            &config,
-            &feedbacks,
-            initial_count,
-        )))
+        let initial = load_persisted_payload(&config, &feedbacks).unwrap_or_else(|| {
+            serialize_payload(Vec::new(), &config, &feedbacks, 0)
+        });
+        Arc::new(RwLock::new(initial))
     };
 
     let listener = UnixListener::bind(&sock_path)?;
@@ -421,6 +440,9 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     broadcast(&data, &clients);
                     if last_cache_save.elapsed() > CACHE_SAVE_DEBOUNCE {
                         save_persisted_cache(&builder);
+                        if let Ok(d) = data.read() {
+                            save_persisted_payload(&d);
+                        }
                         last_cache_save = Instant::now();
                     }
                 }
@@ -471,19 +493,22 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 last_connection = std::time::Instant::now();
+                // First client after idle: rebuild synchronously so the
+                // picker opens on fresh entries, never a stale flash that
+                // corrects itself a second later.
+                if clients.lock().map(|l| l.is_empty()).unwrap_or(false) {
+                    let start = Instant::now();
+                    let (bytes, _count) = build_payload(&config_lock, &feedback_lock, &builder);
+                    if let Ok(mut d) = data.write() {
+                        *d = bytes;
+                    }
+                    info!("rebuilt for client in {}ms", start.elapsed().as_millis());
+                }
                 info!("serving client");
                 if let Ok(bytes) = data.read().map(|d| d.clone())
                     && write_frame(&mut stream, &bytes).is_ok()
                 {
-                    let mut list = clients.lock().unwrap();
-                    let first = list.is_empty();
-                    list.push(stream);
-                    if first {
-                        let (lock, cvar) = &*wake;
-                        let mut pending = lock.lock().unwrap();
-                        *pending = true;
-                        cvar.notify_all();
-                    }
+                    clients.lock().unwrap().push(stream);
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -497,6 +522,9 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                 {
                     info!("idle timeout reached, shutting down daemon");
                     save_persisted_cache(&builder);
+                    if let Ok(d) = data.read() {
+                        save_persisted_payload(&d);
+                    }
                     break;
                 }
                 thread::sleep(ACCEPT_POLL);

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const CACHE_TTL_MS: u128 = 10_000;
 // ponytail: 5s poll, not inotify — keeps picker create/delete snappy at this repo count
@@ -126,21 +126,22 @@ impl GitCache {
     }
 
     pub fn load_disk(&self, cache: &DiskCache) {
-        let stale = Instant::now() - Duration::from_millis((CACHE_TTL_MS + 1) as u64);
+        // Stamp as fresh: disk values serve the first build instantly
+        // (that's the whole point of persisting), then expire by TTL.
+        let now = Instant::now();
         if let Ok(mut m) = self.diffs.lock() {
             for (k, v) in &cache.diffs {
-                m.insert(k.clone(), (v.clone(), stale));
+                m.insert(k.clone(), (v.clone(), now));
             }
         }
-        let stale2 = Instant::now() - Duration::from_millis((WORKTREE_CACHE_TTL_MS + 1) as u64);
         if let Ok(mut m) = self.worktrees.lock() {
             for (k, v) in &cache.worktrees {
-                m.insert(k.clone(), (v.clone(), stale2));
+                m.insert(k.clone(), (v.clone(), now));
             }
         }
         if let Ok(mut m) = self.branches.lock() {
             for (k, v) in &cache.branches {
-                m.insert(k.clone(), (v.clone(), stale));
+                m.insert(k.clone(), (v.clone(), now));
             }
         }
     }

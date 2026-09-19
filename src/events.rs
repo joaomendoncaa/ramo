@@ -444,7 +444,7 @@ impl Picker {
             cur = self.entries[i].parent;
         }
 
-        let is_current = tmux::is_current_session(goto.session);
+        let is_current = tmux::is_current_session(&goto.session);
         if self.auto_close || is_current {
             self.quit = true;
         } else {

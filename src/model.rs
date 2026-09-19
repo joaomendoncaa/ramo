@@ -89,6 +89,9 @@ pub struct Goto {
     pub path: PathBuf,
     pub window: Option<usize>,
     pub pane: Option<usize>,
+    // Stable tmux pane id (`%N`): indexes shift when panes open/close.
+    #[serde(default)]
+    pub pane_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -298,11 +298,16 @@ impl Picker {
             });
             return;
         }
-        if let Some(window) = goto.window {
-            tmux::kill_window(&goto.session, window);
+        if entry.kind == EntryType::Agent {
+            tmux::kill_agent(
+                &tmux::resolve_session(&goto.session),
+                goto.window,
+                goto.pane_id.as_deref(),
+            );
+        } else if let Some(window) = goto.window {
+            tmux::kill_window(&tmux::resolve_session(&goto.session), window);
         } else {
-            let sanitized = goto.session.replace([':', '.'], "_");
-            tmux::kill_session(&sanitized);
+            tmux::kill_session(&tmux::resolve_session(&goto.session));
         }
         self.mode = Mode::Normal;
         self.schedule_refresh();
@@ -437,6 +442,7 @@ impl Picker {
                 path: p.dest.clone(),
                 window: None,
                 pane: None,
+                pane_id: None,
             }),
             parent: Some(dir_idx),
             connector: String::new(),
@@ -598,11 +604,11 @@ impl Picker {
                 && e.kind == EntryType::Agent
                 && let Some(g) = &e.goto
             {
-                if let Some(w) = g.window {
-                    tmux::kill_window(&g.session, w);
-                } else {
-                    tmux::kill_session(&g.session.replace([':', '.'], "_"));
-                }
+                tmux::kill_agent(
+                    &tmux::resolve_session(&g.session),
+                    g.window,
+                    g.pane_id.as_deref(),
+                );
             }
         }
         if let Some(name) = wt.file_name().map(|n| n.to_string_lossy().replace([':', '.'], "_")) {
