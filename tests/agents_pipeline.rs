@@ -302,6 +302,23 @@ fn closed_pane_becomes_dormant_once_seen() {
 }
 
 #[test]
+fn closed_dir_hides_dormant_agents() {
+    let fx = fixture();
+    let b = builder_with_reports(&[("%11", "ses-a")]);
+    let sessions = vec![tmux_session("alpha", &fx.alpha)];
+    let live_panes = vec![pane("alpha", 1, 0, "%11", &fx.alpha)];
+    let api = vec![sess("ses-a", "Alpha work", &fx.alpha, false)];
+    let live = b.build_with(&fx.config, &sessions, &live_panes, &api);
+    assert!(live_agents_of(&live).iter().any(|e| e.label == "Alpha work"));
+    // Dir itself closed (no tmux session, no panes): dormant stays out.
+    let after = b.build_with(&fx.config, &[], &[], &api);
+    assert!(
+        agents_of(&after).is_empty(),
+        "closed dir shows no agents: {after:?}"
+    );
+}
+
+#[test]
 fn daemon_respawn_keeps_live_bindings() {
     // The picker respawns the daemon on every flagged open, wiping
     // in-memory reports. A respawned daemon must be born accurate —

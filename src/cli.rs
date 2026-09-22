@@ -3,7 +3,8 @@ use crate::config::Config;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Daemon {
     Info,
-    Start,
+    Start { detached: bool },
+    Restart { detached: bool },
     Kill,
     Logs,
     Install,
@@ -44,16 +45,26 @@ impl Cli {
         let args: Vec<String> = std::env::args().collect();
         let mut command = Command::Run;
         let mut overrides = Vec::new();
+        let mut detached = false;
         let mut i = 1;
 
         while i < args.len() {
             match args[i].as_str() {
                 "help" | "--help" | "-h" => command = Command::Help,
+                "-d" | "--detached" => {
+                    detached = true;
+                    if let Command::Daemon(Daemon::Start { detached: d })
+                    | Command::Daemon(Daemon::Restart { detached: d }) = &mut command
+                    {
+                        *d = true;
+                    }
+                }
                 "daemon" => {
                     i += 1;
                     command = if i < args.len() {
                         match args[i].as_str() {
-                            "start" => Command::Daemon(Daemon::Start),
+                            "start" => Command::Daemon(Daemon::Start { detached }),
+                            "restart" => Command::Daemon(Daemon::Restart { detached }),
                             "kill" => Command::Daemon(Daemon::Kill),
                             "logs" => Command::Daemon(Daemon::Logs),
                             "install" => Command::Daemon(Daemon::Install),
@@ -141,7 +152,8 @@ use `ramo help` to see usage
 ramo                Open picker (starts daemon if not running yet)\n\
 \n\
 ramo daemon         Print current daemon info\n\
-ramo daemon start   Start a daemon\n\
+ramo daemon start [-d|--detached]   Start a daemon (foreground unless detached)\n\
+ramo daemon restart [-d|--detached] Kill + start a daemon\n\
 ramo daemon kill    Kill running daemon\n\
 ramo daemon logs    Tail daemon logs\n\
 ramo daemon install     Install systemd user service (daemon starts at login)\n\

@@ -15,8 +15,14 @@ fn main() -> io::Result<()> {
             println!("{}", cli.help());
             return Ok(());
         }
-        Command::Daemon(Daemon::Start) => {
+        Command::Daemon(Daemon::Start { detached }) => {
+            if detached {
+                return daemon::start_detached(cli.overrides);
+            }
             return daemon::start_daemon(cli.overrides);
+        }
+        Command::Daemon(Daemon::Restart { detached }) => {
+            return daemon::restart_daemon(cli.overrides, detached);
         }
         Command::Daemon(Daemon::Kill) | Command::Kill => {
             daemon::kill();

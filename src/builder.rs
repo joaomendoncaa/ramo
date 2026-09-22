@@ -615,36 +615,44 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
         search_text_lower: String::new(),
         session_id: None,
     }));
-    let total_children = entry.sessions.len() + entry.dormant.len() + entry.worktrees.len();
+    let show_agents = entry.is_open;
+    let agent_count = if show_agents {
+        entry.sessions.len() + entry.dormant.len()
+    } else {
+        0
+    };
+    let total_children = agent_count + entry.worktrees.len();
     if total_children == 0 {
         return;
     }
     let mut child = 0;
-    for ps in &entry.sessions {
-        let is_last = child == total_children - 1;
-        child += 1;
-        push_agent_row(
-            rows,
-            ps,
-            1,
-            vec![],
-            is_last,
-            format!("{} {}", entry.name, ps.session.title),
-            Some(dir_idx),
-        );
-    }
-    for s in &entry.dormant {
-        let is_last = child == total_children - 1;
-        child += 1;
-        push_dormant_row(
-            rows,
-            s,
-            1,
-            vec![],
-            is_last,
-            format!("{} {}", entry.name, s.title),
-            Some(dir_idx),
-        );
+    if show_agents {
+        for ps in &entry.sessions {
+            let is_last = child == total_children - 1;
+            child += 1;
+            push_agent_row(
+                rows,
+                ps,
+                1,
+                vec![],
+                is_last,
+                format!("{} {}", entry.name, ps.session.title),
+                Some(dir_idx),
+            );
+        }
+        for s in &entry.dormant {
+            let is_last = child == total_children - 1;
+            child += 1;
+            push_dormant_row(
+                rows,
+                s,
+                1,
+                vec![],
+                is_last,
+                format!("{} {}", entry.name, s.title),
+                Some(dir_idx),
+            );
+        }
     }
     for w in &entry.worktrees {
         let is_last = child == total_children - 1;
@@ -685,6 +693,9 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             search_text_lower: String::new(),
             session_id: None,
         }));
+        if !w.is_open {
+            continue;
+        }
         let s_total = w.sessions.len();
         let d_total = w.dormant.len();
         for (si, ps) in w.sessions.iter().enumerate() {
@@ -781,6 +792,10 @@ fn push_wt_root(root: &WtRoot, is_last_root: bool, rows: &mut Vec<Entry>) {
         search_text_lower: String::new(),
         session_id: None,
     }));
+    // Agents live in panes: a closed worktree has none to show.
+    if !root.wt.is_open {
+        return;
+    }
     let s_total = root.wt.sessions.len();
     let d_total = root.wt.dormant.len();
     for (si, ps) in root.wt.sessions.iter().enumerate() {

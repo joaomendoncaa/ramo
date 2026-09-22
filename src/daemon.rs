@@ -38,6 +38,61 @@ pub fn start_daemon(overrides: Vec<(String, Option<String>)>) -> std::io::Result
     start(overrides)
 }
 
+pub fn start_detached(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
+    if is_daemon_running() {
+        eprintln!("daemon already running");
+        return Ok(());
+    }
+    spawn(&overrides).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "failed to spawn detached daemon")
+    })?;
+    // Bounded readiness check: the child's first build can take a while
+    // (slow `opencode api`), and a blocking read would hang the parent
+    // for the whole rebuild. Detached means fire-and-forget — confirm
+    // if fast, otherwise report starting and leave.
+    for _ in 0..40 {
+        let ready = UnixStream::connect(sock_path())
+            .ok()
+            .and_then(|mut s| {
+                s.set_read_timeout(Some(Duration::from_millis(50))).ok()?;
+                read_frame(&mut s).ok()
+            })
+            .is_some();
+        if ready {
+            println!("daemon started (detached)");
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    println!("daemon starting (detached)");
+    Ok(())
+}
+
+pub fn restart_daemon(
+    overrides: Vec<(String, Option<String>)>,
+    detached: bool,
+) -> std::io::Result<()> {
+    let old_pid = std::fs::read_to_string(pid_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    kill();
+    // SIGTERM/systemd stop are async; wait for the old pid so the new
+    // bind doesn't race the old daemon's shutdown cleanup.
+    if let Some(pid) = old_pid {
+        for _ in 0..40 {
+            if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    if detached {
+        start_detached(overrides)
+    } else {
+        start(overrides)
+    }
+}
+
 use log::{error, info, warn};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
