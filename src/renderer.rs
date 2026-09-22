@@ -341,6 +341,9 @@ fn render_help(frame: &mut Frame, picker: &mut Picker) {
 }
 
 pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Line<'_> {
+    if entry.kind == EntryType::Agent && entry.goto.is_none() && !is_cursor {
+        return dormant_entry(entry, spinner);
+    }
     let effective_dim = dimmed && !is_cursor;
     let marker_fg = if effective_dim {
         CMD_DIM
@@ -421,6 +424,26 @@ pub fn entry(entry: &Entry, spinner: usize, is_cursor: bool, dimmed: bool) -> Li
         line = line.style(Style::default().bg(CURSOR_BG).fg(CURSOR_FG));
     }
     line
+}
+
+fn dormant_entry(entry: &Entry, spinner: usize) -> Line<'_> {
+    // ponytail: dormant rows carry no branch/changes; same dim style covers them if added later
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let mut spans = vec![Span::styled(entry.connector(), dim)];
+    spans.push(Span::styled(format!("{} ", entry.marker(spinner)), dim));
+    spans.push(Span::styled(entry.label.as_str(), dim));
+    if let Some(branch) = &entry.branch {
+        spans.push(Span::styled(format!(" {}", branch), dim));
+    }
+    if let Some(changes) = &entry.changes
+        && !changes.has_none()
+    {
+        spans.push(Span::styled(
+            format!(" +{} -{}", changes.additions, changes.deletions),
+            dim,
+        ));
+    }
+    Line::from(spans)
 }
 
 fn gap_line(entry: &Entry, dimmed: bool) -> Line<'static> {
