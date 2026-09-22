@@ -63,6 +63,10 @@ bind-nav-up = up,ctrl-p
 bind-nav-down = down,ctrl-n
 bind-nav-page-up = ctrl-u
 bind-nav-page-down = ctrl-d
+# hide an agent session (dormant rows vanish; live panes still show).
+# shares ctrl-a with bind-input-home: on an agent row it archives,
+# anywhere else it jumps to start of input
+bind-agent-archive = ctrl-a
 bind-input-left = left
 bind-input-right = right
 bind-input-home = ctrl-a

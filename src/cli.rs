@@ -22,6 +22,8 @@ pub enum Command {
     Daemon(Daemon),
     Plugin(Plugin),
     Agents,
+    Archive,
+    Unarchive { ids: Vec<String>, all: bool },
     Focus {
         session: String,
         pane_id: String,
@@ -77,6 +79,26 @@ impl Cli {
                 }
                 "kill" => command = Command::Kill,
                 "agents" => command = Command::Agents,
+                "archive" => command = Command::Archive,
+                "unarchive" => {
+                    let mut ids = Vec::new();
+                    let mut all = false;
+                    while i + 1 < args.len() {
+                        i += 1;
+                        match args[i].as_str() {
+                            "--all" => all = true,
+                            s if s.starts_with("--") => {
+                                if let Some((key, value)) = s[2..].split_once('=') {
+                                    overrides.push((key.to_string(), Some(value.to_string())));
+                                } else {
+                                    overrides.push((s[2..].to_string(), None));
+                                }
+                            }
+                            _ => ids.push(args[i].clone()),
+                        }
+                    }
+                    command = Command::Unarchive { ids, all };
+                }
                 "focus" => {
                     let get = |k: usize| args.get(i + k).cloned().unwrap_or_default();
                     command = Command::Focus {
@@ -164,6 +186,8 @@ ramo purge --with-config  Remove daemon service, state and config\n\
 \n\
 ramo kill           Alias for daemon kill\n\
 ramo agents         Print live agents as JSON (for bars/widgets)\n\
+ramo archive        List hidden agent sessions\n\
+ramo unarchive ID...|--all  Restore hidden agent sessions\n\
 ramo focus SESSION PANE_ID WINDOW PANE   Jump to an agent pane (for bars/widgets)\n\
 \n\
 ramo plugin install Install opencode TUI plugin for exact per-pane session tracking\n\

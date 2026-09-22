@@ -207,6 +207,11 @@ impl Picker {
             self.quit = true;
             return;
         }
+        // Archive wins over input-home on agent rows; elsewhere ctrl-a
+        // falls through to `edit_input` (start of input) below.
+        if Config::key_matches(&self.config.bind_agent_archive, key) && self.archive_selected() {
+            return;
+        }
         if let Some(needs_filter) = self.edit_input(key) {
             if needs_filter {
                 self.filter();
@@ -438,8 +443,10 @@ impl Picker {
 
         self.pending_goto = Some(goto.clone());
 
+        // Bounded: a chain longer than the list must repeat a row.
         let mut cur = Some(idx);
-        while let Some(i) = cur {
+        for _ in 0..self.entries.len() + 1 {
+            let Some(i) = cur else { break };
             self.entries[i].is_open = true;
             cur = self.entries[i].parent;
         }

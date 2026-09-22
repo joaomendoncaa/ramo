@@ -119,6 +119,7 @@ config! {
     bind_nav_down               : String = "down,ctrl-n".to_string(),
     bind_nav_page_up            : String = "ctrl-u".to_string(),
     bind_nav_page_down          : String = "ctrl-d".to_string(),
+    bind_agent_archive          : String = "ctrl-a".to_string(),
     bind_input_left             : String = "left".to_string(),
     bind_input_right            : String = "right".to_string(),
     bind_input_home             : String = "ctrl-a".to_string(),
@@ -438,5 +439,37 @@ fn parse_u64(name: &str, value: &str) -> Result<u64, String> {
         Err(_) => Err(format!(
             "'{name}' has invalid value {value:?} — expected a non-negative integer, falling back to default"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEventKind, KeyEventState};
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn agent_archive_bind_is_configurable() {
+        assert_eq!(Config::default().bind_agent_archive, "ctrl-a");
+        let path = Path::new("config");
+        let (cfg, fbs) = Config::parse_content(path, "bind-agent-archive = ctrl-x\n");
+        assert!(fbs.is_empty(), "valid key produces no feedback: {fbs:?}");
+        assert_eq!(cfg.bind_agent_archive, "ctrl-x");
+        assert!(Config::key_matches(
+            &cfg.bind_agent_archive,
+            key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+        ));
+        assert!(!Config::key_matches(
+            &cfg.bind_agent_archive,
+            key(KeyCode::Char('a'), KeyModifiers::CONTROL)
+        ));
     }
 }

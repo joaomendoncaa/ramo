@@ -18,6 +18,10 @@ pub struct TreeBuilder {
     // go dormant — the API's full history stays out of the list until
     // ramo actually sees a session open. Survives restarts via cache.json.
     seen: Mutex<HashSet<String>>,
+    // Session ids the user hid (`ramo archive` / ctrl-a). Dormant rows
+    // for these stay out; live panes always show. Loaded from disk so
+    // daemon restarts keep respecting hides.
+    archived: Mutex<HashSet<String>>,
 }
 
 impl TreeBuilder {
@@ -26,6 +30,9 @@ impl TreeBuilder {
             git_cache: GitCache::new(),
             reports,
             seen: Mutex::new(HashSet::new()),
+            archived: Mutex::new(
+                load_archived_from(&archived_path()).into_keys().collect(),
+            ),
         }
     }
 
@@ -41,6 +48,13 @@ impl TreeBuilder {
         self.reports.clone()
     }
 
+    /// Hide a session id from dormant rows (test seam; the picker and
+    /// CLI persist through [`save_archived_to`] directly, the daemon
+    /// picks file state up at construction). Memory-only by design.
+    pub fn archive(&self, id: &str) {
+        self.archived.lock().unwrap().insert(id.to_string());
+    }
+
     pub fn load_disk_cache(&self, cache: &crate::git::DiskCache) {
         self.git_cache.load_disk(cache);
     }
@@ -49,12 +63,13 @@ impl TreeBuilder {
     }
 
     pub fn build(&self, config: &Config) -> Option<Vec<Entry>> {
-        let (tmux_snapshot, oc_sessions) = std::thread::scope(|s| {
+        let (tmux_snapshot, oc_sessions, current) = std::thread::scope(|s| {
             let tmux_h = s.spawn(tmux::snapshot);
             let oc_h = s.spawn(|| {
                 opencode::sessions(&config.opencode_agents_ignored)
             });
-            (tmux_h.join().unwrap(), oc_h.join().unwrap())
+            let cur_h = s.spawn(tmux::current_session_name);
+            (tmux_h.join().unwrap(), oc_h.join().unwrap(), cur_h.join().unwrap())
         });
         // A transient `opencode api` failure must not wipe the list for a
         // frame (every pane would flash synthetic, then snap back). The
@@ -65,18 +80,23 @@ impl TreeBuilder {
             &tmux_snapshot.sessions,
             &tmux_snapshot.panes,
             &oc_sessions,
+            current.as_deref(),
         ))
     }
 
     /// Pure assembly from already-fetched inputs. Headless tests drive
     /// the whole agent pipeline through here with fake tmux panes,
     /// fake API sessions and real reports — no tmux/opencode binaries.
+    /// `current_session` is the tmux session the picker was opened from
+    /// (used only to pick the jump target when several panes show one
+    /// agent session); tests pass `None` unless pinning that rule.
     pub fn build_with(
         &self,
         config: &Config,
         sessions: &[TmuxSession],
         panes: &[TmuxPane],
         oc_sessions: &[Opencode],
+        current_session: Option<&str>,
     ) -> Vec<Entry> {
 
         let oc_panes = tmux::opencode_panes(panes);
@@ -86,19 +106,23 @@ impl TreeBuilder {
             &panes.iter().map(|p| p.pane_id.clone()).collect(),
         );
         let (pane_sessions, bound) =
-            match_panes_to_sessions(&oc_panes, oc_sessions, &self.reports);
+            match_panes_to_sessions(&oc_panes, oc_sessions, &self.reports, current_session);
         // Sessions no live pane binds (exited to shell, pane closed,
         // `/new` moved the pane on) stay listed as dormant rows under
         // their directory — but only sessions ramo has actually seen
         // open. Everything older than tracking stays out until opened.
         self.seen.lock().unwrap().extend(bound.iter().cloned());
         let seen = self.seen.lock().unwrap();
+        let archived = self.archived.lock().unwrap();
         let mut dormant: Vec<Opencode> = oc_sessions
             .iter()
-            .filter(|s| !bound.contains(&s.id) && seen.contains(&s.id))
+            .filter(|s| {
+                !bound.contains(&s.id) && seen.contains(&s.id) && !archived.contains(&s.id)
+            })
             .cloned()
             .collect();
         drop(seen);
+        drop(archived);
         // Stable by id: sorting by recency reordered rows under the
         // cursor whenever any session updated mid-picker.
         dormant.sort_by(|a, b| a.id.cmp(&b.id));
@@ -191,6 +215,10 @@ impl TreeBuilder {
 
         let mut dir_entries: Vec<DirEntry> = Vec::with_capacity(dirs.len());
         for ((d, git), branch) in dirs.iter().zip(git_data.iter()).zip(branches) {
+            // Closed dirs show no dormant agents: rows with no goto that
+            // nobody can jump to are stale-feeling noise.
+            let visible: &[Opencode] =
+                if open.contains(&d.path) { &dormant } else { &[] };
             dir_entries.push(build_dir_entry(
                 d,
                 git,
@@ -198,7 +226,7 @@ impl TreeBuilder {
                 sessions,
                 panes,
                 &pane_sessions,
-                &dormant,
+                visible,
             ));
         }
         for s in tmux::list_external_sessions(sessions, &covered_paths, &covered_names) {
@@ -615,44 +643,36 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
         search_text_lower: String::new(),
         session_id: None,
     }));
-    let show_agents = entry.is_open;
-    let agent_count = if show_agents {
-        entry.sessions.len() + entry.dormant.len()
-    } else {
-        0
-    };
-    let total_children = agent_count + entry.worktrees.len();
+    let total_children = entry.sessions.len() + entry.dormant.len() + entry.worktrees.len();
     if total_children == 0 {
         return;
     }
     let mut child = 0;
-    if show_agents {
-        for ps in &entry.sessions {
-            let is_last = child == total_children - 1;
-            child += 1;
-            push_agent_row(
-                rows,
-                ps,
-                1,
-                vec![],
-                is_last,
-                format!("{} {}", entry.name, ps.session.title),
-                Some(dir_idx),
-            );
-        }
-        for s in &entry.dormant {
-            let is_last = child == total_children - 1;
-            child += 1;
-            push_dormant_row(
-                rows,
-                s,
-                1,
-                vec![],
-                is_last,
-                format!("{} {}", entry.name, s.title),
-                Some(dir_idx),
-            );
-        }
+    for ps in &entry.sessions {
+        let is_last = child == total_children - 1;
+        child += 1;
+        push_agent_row(
+            rows,
+            ps,
+            1,
+            vec![],
+            is_last,
+            format!("{} {}", entry.name, ps.session.title),
+            Some(dir_idx),
+        );
+    }
+    for s in &entry.dormant {
+        let is_last = child == total_children - 1;
+        child += 1;
+        push_dormant_row(
+            rows,
+            s,
+            1,
+            vec![],
+            is_last,
+            format!("{} {}", entry.name, s.title),
+            Some(dir_idx),
+        );
     }
     for w in &entry.worktrees {
         let is_last = child == total_children - 1;
@@ -693,9 +713,6 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             search_text_lower: String::new(),
             session_id: None,
         }));
-        if !w.is_open {
-            continue;
-        }
         let s_total = w.sessions.len();
         let d_total = w.dormant.len();
         for (si, ps) in w.sessions.iter().enumerate() {
@@ -792,10 +809,6 @@ fn push_wt_root(root: &WtRoot, is_last_root: bool, rows: &mut Vec<Entry>) {
         search_text_lower: String::new(),
         session_id: None,
     }));
-    // Agents live in panes: a closed worktree has none to show.
-    if !root.wt.is_open {
-        return;
-    }
     let s_total = root.wt.sessions.len();
     let d_total = root.wt.dormant.len();
     for (si, ps) in root.wt.sessions.iter().enumerate() {
@@ -848,9 +861,9 @@ struct WtEntry {
 }
 
 #[derive(Clone)]
-pub(crate) struct PaneSession {
-    pub(crate) pane: TmuxPane,
-    pub(crate) session: Opencode,
+struct PaneSession {
+    pane: TmuxPane,
+    session: Opencode,
 }
 
 fn synthetic(p: &TmuxPane) -> Opencode {
@@ -865,10 +878,11 @@ fn synthetic(p: &TmuxPane) -> Opencode {
     }
 }
 
-pub(crate) fn match_panes_to_sessions(
+fn match_panes_to_sessions(
     panes: &[&TmuxPane],
     sessions: &[Opencode],
     reports: &report::ReportMap,
+    current_session: Option<&str>,
 ) -> (Vec<PaneSession>, HashSet<String>) {
     // Binding is report-or-nothing. A pane is an opencode pane iff
     // `tmux::opencode_panes` classified it by `pane_current_command`;
@@ -911,7 +925,46 @@ pub(crate) fn match_panes_to_sessions(
             });
         }
     }
-    (out, consumed)
+    (collapse_shared(out, current_session), consumed)
+}
+
+// One row per session: N screens on the same session rendered N identical
+// rows (only reachable via moves + multi-viewer switches, but it reads as
+// a glitch). The jump target ranks: viewer in the tmux session the picker
+// was opened from (the latest terminal by construction — constant while
+// open, so it never flips rows mid-picker) > viewer at home (cwd under
+// the session dir) > stable-first. A closed winner simply loses the next
+// rebuild and the survivor takes the row. Synthetics are per-pane
+// unknowns and never merge.
+fn collapse_shared(sessions: Vec<PaneSession>, current: Option<&str>) -> Vec<PaneSession> {
+    let rank = |ps: &PaneSession| {
+        let here = current.is_some_and(|c| ps.pane.session_name == c);
+        let home = is_in(&ps.pane.current_path, &ps.session.directory);
+        (!here, !home)
+    };
+    // Input is already stable-sorted; strict improvement keeps the first
+    // of equals, so ties stay deterministic across rebuilds.
+    let mut best: HashMap<String, (usize, (bool, bool))> = HashMap::new();
+    for (i, ps) in sessions.iter().enumerate() {
+        if ps.session.id.starts_with("synthetic:") {
+            continue;
+        }
+        let replace = match best.get(&ps.session.id) {
+            None => true,
+            Some(&(_, br)) => rank(ps) < br,
+        };
+        if replace {
+            best.insert(ps.session.id.clone(), (i, rank(ps)));
+        }
+    }
+    sessions
+        .into_iter()
+        .enumerate()
+        .filter(|(i, ps)| {
+            ps.session.id.starts_with("synthetic:") || best.get(&ps.session.id) == Some(&(*i, rank(ps)))
+        })
+        .map(|(_, ps)| ps)
+        .collect()
 }
 
 fn is_in(path: &Path, base: &Path) -> bool {
@@ -930,4 +983,65 @@ fn finalize_entry(mut entry: Entry) -> Entry {
     entry.compute_connector();
     entry.search_text_lower = entry.search_text.to_lowercase();
     entry
+}
+
+// Hidden sessions live here as id -> title. The picker and CLI own the
+// file (possibly from another process); the daemon reads it at
+// construction and the picker re-reads it on every payload.
+pub fn archived_path() -> PathBuf {
+    crate::logs::state_dir().join("archived.json")
+}
+
+pub fn load_archived_from(path: &Path) -> HashMap<String, String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_archived_to(path: &Path, map: &HashMap<String, String>) {
+    if path.parent().is_some_and(|d| std::fs::create_dir_all(d).is_err()) {
+        return;
+    }
+    if let Ok(bytes) = serde_json::to_vec(map) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+pub fn run_archive_list() {
+    let map = load_archived_from(&archived_path());
+    if map.is_empty() {
+        println!("no archived sessions");
+        return;
+    }
+    let mut ids: Vec<&String> = map.keys().collect();
+    ids.sort();
+    for id in ids {
+        println!("{id} {}", map[id].as_str());
+    }
+}
+
+pub fn run_unarchive(ids: &[String], all: bool) {
+    let path = archived_path();
+    if all {
+        let _ = std::fs::remove_file(&path);
+        println!("unarchived all sessions");
+        return;
+    }
+    let mut map = load_archived_from(&path);
+    let mut restored = Vec::new();
+    for id in ids {
+        if map.remove(id).is_some() {
+            restored.push(id.clone());
+        }
+    }
+    save_archived_to(&path, &map);
+    if restored.is_empty() {
+        println!("nothing unarchived");
+    } else {
+        println!("unarchived {}", restored.join(" "));
+    }
 }

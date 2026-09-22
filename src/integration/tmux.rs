@@ -233,15 +233,17 @@ pub fn select_pane(session: &str, window: usize, pane: usize) {
         .status();
 }
 
-pub fn is_current_session(name: &str) -> bool {
+pub fn current_session_name() -> Option<String> {
     Command::new("tmux")
         .args(["display-message", "-p", "#{session_name}"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
-        .map(|s| s == name)
-        .unwrap_or(false)
+}
+
+pub fn is_current_session(name: &str) -> bool {
+    current_session_name().map(|s| s == name).unwrap_or(false)
 }
 
 fn has_session(name: &str) -> bool {

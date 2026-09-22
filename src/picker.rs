@@ -1,4 +1,5 @@
 use crate::clickable::{Action, Clickable};
+use crate::builder::{archived_path, load_archived_from, save_archived_to};
 use crate::config::Config;
 use crate::daemon;
 use crate::git;
@@ -6,9 +7,10 @@ use crate::logs;
 use crate::model::{Entry, EntryType, FeedbackEntry, FeedbackType, Goto, Payload};
 use crate::integration::tmux;
 use ratatui::layout::Rect;
+use std::collections::HashSet;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const SPINNER_MS: u128 = 30;
 const SPINUP_TAU_MS: f64 = 2000.0;
@@ -51,6 +53,10 @@ struct PendingCreate {
 
 // ponytail: 60s ceiling, git is instant or hung — a spinner must never stick forever
 const PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+// Tombstone window for worktrees deleted here: covers the daemon's 5s
+// worktree cache + rebuild interval so stale payloads can't resurrect
+// the row. Same-path recreation inside the window stays hidden.
+const DELETED_TTL: Duration = Duration::from_secs(60);
 
 pub struct Picker {
     pub(crate) entries: Vec<Entry>,
@@ -85,6 +91,12 @@ pub struct Picker {
     op_tx: mpsc::Sender<OpResult>,
     op_rx: mpsc::Receiver<OpResult>,
     pending_create: Option<PendingCreate>,
+    // Worktree paths deleted here with instant. Stale daemon payloads
+    // can't resurrect them until the tombstone expires (see DELETED_TTL).
+    deleted: Vec<(std::path::PathBuf, Instant)>,
+    // Mirrors archived.json in memory so hides apply instantly and stale
+    // pre-archive daemon payloads can't resurrect rows in tick().
+    archived: HashSet<String>,
 }
 
 impl Picker {
@@ -129,10 +141,67 @@ impl Picker {
             op_tx,
             op_rx,
             pending_create: None,
+            deleted: Vec::new(),
+            archived: HashSet::new(),
         };
+        picker.reload_archived();
+        picker.filter_archived();
         picker.filtered = picker.filtered();
         picker.cursor = picker.find_initial_cursor();
         picker
+    }
+
+    fn reload_archived(&mut self) {
+        self.archived = load_archived_from(&archived_path()).into_keys().collect();
+    }
+
+    /// Drop dormant rows for archived sessions. Live panes always stay —
+    /// hiding an open pane would ghost it, and the daemon does the same.
+    fn filter_archived(&mut self) {
+        if self.archived.is_empty() {
+            return;
+        }
+        let archived = self.archived.clone();
+        self.retain_entries(|e| {
+            e.kind != EntryType::Agent
+                || e.goto.is_some()
+                || e.session_id.as_deref().is_none_or(|id| !archived.contains(id))
+        });
+    }
+
+    /// Like `Vec::retain`, but rewrites ancestor links to the surviving
+    /// indexes. Dropping rows shifts everything after them; stale links
+    /// self-parent and hang the ancestor walks on Enter.
+    fn retain_entries(&mut self, keep: impl Fn(&Entry) -> bool) {
+        let mut remap: Vec<Option<usize>> = Vec::with_capacity(self.entries.len());
+        let mut next = Vec::with_capacity(self.entries.len());
+        for e in self.entries.drain(..) {
+            if keep(&e) {
+                remap.push(Some(next.len()));
+                next.push(e);
+            } else {
+                remap.push(None);
+            }
+        }
+        for e in &mut next {
+            e.parent = e.parent.and_then(|p| remap.get(p).copied().flatten());
+        }
+        self.entries = next;
+    }
+
+    /// Drop tombstoned worktree rows (plus their agent children, whose
+    /// directory sits under the deleted path). Stale daemon payloads
+    /// can't resurrect them until the tombstone expires.
+    fn filter_deleted(&mut self) {
+        self.deleted.retain(|(_, t)| t.elapsed() < DELETED_TTL);
+        if self.deleted.is_empty() {
+            return;
+        }
+        let gone: Vec<std::path::PathBuf> = self.deleted.iter().map(|(p, _)| p.clone()).collect();
+        self.entries.retain(|e| {
+            (e.kind != EntryType::Worktree && e.kind != EntryType::Agent)
+                || !gone.iter().any(|d| e.path == *d || e.path.starts_with(d))
+        });
     }
 
     pub fn tick(&mut self) -> Signal {
@@ -163,6 +232,13 @@ impl Picker {
                     .map(|e| e.stable_key());
                 self.entries_found = payload.entries_found.max(payload.entries.len());
                 self.entries = payload.entries;
+                // The archive file is owned by picker/CLI actions (possibly
+                // another process): reload so `ramo unarchive` applies to
+                // open pickers, and stale pre-archive payloads can't
+                // resurrect rows the user just hid.
+                self.reload_archived();
+                self.filter_archived();
+                self.filter_deleted();
                 self.feedbacks = payload.feedbacks.clone();
                 self.config = payload.config;
                 self.auto_close = self.config.auto_close;
@@ -328,13 +404,50 @@ impl Picker {
             return;
         }
         tmux::open_detached(&goto);
+        // Bounded: a chain longer than the list must repeat a row.
         let mut cur = Some(idx);
-        while let Some(i) = cur {
+        for _ in 0..self.entries.len() + 1 {
+            let Some(i) = cur else { break };
             self.entries[i].is_open = true;
             cur = self.entries[i].parent;
         }
         self.mode = Mode::Normal;
         self.schedule_refresh();
+    }
+
+    /// Hide the agent under the cursor. Only rows with a stable opencode
+    /// session id are archivable (synthetic "New session" rows return false
+    /// so ctrl-a keeps its input-home meaning there).
+    pub fn archive_selected(&mut self) -> bool {
+        self.archive_selected_to(&crate::builder::archived_path())
+    }
+
+    /// File-backed seam: production passes [`crate::builder::archived_path`];
+    /// tests pass a tmp path to stay hermetic. Silent by design — the row
+    /// just vanishes.
+    pub fn archive_selected_to(&mut self, path: &std::path::Path) -> bool {
+        let Some(&idx) = self.filtered.get(self.cursor) else {
+            return false;
+        };
+        let entry = self.entries[idx].clone();
+        if entry.kind != EntryType::Agent {
+            return false;
+        }
+        let Some(id) = entry.session_id.clone().filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        self.archived.insert(id.clone());
+        let mut map = load_archived_from(path);
+        map.insert(id.clone(), entry.label.clone());
+        save_archived_to(path, &map);
+        // Drop dormant rows now; live panes stay until closed (same rule
+        // as filter_archived, so stale daemon payloads converge too).
+        let pos = self.cursor;
+        self.retain_entries(|e| e.goto.is_some() || e.session_id.as_deref() != Some(id.as_str()));
+        self.filtered = self.filtered();
+        self.cursor = pos.min(self.filtered.len().saturating_sub(1));
+        self.schedule_refresh();
+        true
     }
 
     pub fn create_worktree(&mut self) {
@@ -514,7 +627,7 @@ impl Picker {
             return;
         }
         let p = self.pending_create.take().unwrap();
-        self.entries.retain(|e| !(e.pending && e.path == p.dest));
+        self.retain_entries(|e| !(e.pending && e.path == p.dest));
         self.feedbacks.push(FeedbackEntry {
             level: FeedbackType::Error,
             message,
@@ -555,7 +668,7 @@ impl Picker {
             .any(|e| e.kind == EntryType::Worktree && !e.pending && e.path == p.dest)
         {
             self.pending_create = None;
-            self.entries.retain(|e| !e.pending);
+            self.retain_entries(|e| !e.pending);
             self.filtered = self.filtered();
             if self
                 .filtered
@@ -615,10 +728,16 @@ impl Picker {
             tmux::kill_session(&name);
         }
         match git::worktree_remove(&repo, &wt) {
-            Ok(()) => self.feedbacks.push(FeedbackEntry {
-                level: FeedbackType::Warning,
-                message: format!("✓ worktree {} removed", wt.display()),
-            }),
+            Ok(()) => {
+                self.feedbacks.push(FeedbackEntry {
+                    level: FeedbackType::Warning,
+                    message: format!("✓ worktree {} removed", wt.display()),
+                });
+                self.deleted.push((wt, Instant::now()));
+                self.filter_deleted();
+                self.filtered = self.filtered();
+                self.cursor = self.cursor.min(self.filtered.len().saturating_sub(1));
+            }
             Err(e) => self.feedbacks.push(FeedbackEntry {
                 level: FeedbackType::Error,
                 message: format!("cannot remove worktree: {e}"),
@@ -840,3 +959,116 @@ impl Picker {
     }
 }
 
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    use crate::model::{Entry, EntryType, Goto, Payload};
+
+    // Regression: rows dropped by archive shifted entry indexes without
+    // remapping `parent`, so a later agent could end up parented to
+    // itself and the ancestor walk in `activate_entry` spun forever
+    // (100% CPU, frozen TUI) on the next Enter.
+    fn dir_entry(name: &str) -> Entry {
+        Entry {
+            kind: EntryType::Dir,
+            label: name.into(),
+            path: format!("/tmp/ramo-archive/{name}").into(),
+            changes: None,
+            branch: None,
+            is_open: true,
+            is_running: false,
+            pending: false,
+            depth: 0,
+            ancestors: vec![],
+            is_last: false,
+            search_text: name.into(),
+            goto: Some(Goto {
+                session: name.into(),
+                path: format!("/tmp/ramo-archive/{name}").into(),
+                window: None,
+                pane: None,
+                pane_id: None,
+            }),
+            parent: None,
+            connector: String::new(),
+            search_text_lower: name.to_lowercase(),
+            session_id: None,
+        }
+    }
+
+    fn agent(dir_idx: usize, session_id: &str, live: bool) -> Entry {
+        Entry {
+            kind: EntryType::Agent,
+            label: format!("agent {session_id}"),
+            path: format!("/tmp/ramo-archive/dir{}", dir_idx / 2 + 1).into(),
+            changes: None,
+            branch: None,
+            is_open: false,
+            is_running: false,
+            pending: false,
+            depth: 1,
+            ancestors: vec![],
+            is_last: true,
+            search_text: session_id.into(),
+            goto: live.then(|| Goto {
+                session: "some-session".into(),
+                path: format!("/tmp/ramo-archive/dir{}", dir_idx / 2 + 1).into(),
+                window: Some(1),
+                pane: Some(1),
+                pane_id: Some("%99".into()),
+            }),
+            parent: Some(dir_idx),
+            connector: String::new(),
+            search_text_lower: session_id.to_lowercase(),
+            session_id: Some(session_id.into()),
+        }
+    }
+
+    #[test]
+    fn archive_remaps_parent_links() {
+        let config = Config::default();
+        // DirA, dormant AgA, DirB, live AgB: archiving AgA drops index 1,
+        // shifting DirB/AgB down one.
+        let mut picker = Picker::new(Payload {
+            entries: vec![
+                dir_entry("dirA"),
+                agent(0, "ses-aaa", false),
+                dir_entry("dirB"),
+                agent(2, "ses-bbb", true),
+            ],
+            config: config.clone(),
+            feedbacks: vec![],
+            entries_found: 4,
+        });
+        let tmp = std::env::temp_dir().join(format!("ramo-archive-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+
+        picker.cursor = picker
+            .filtered
+            .iter()
+            .position(|&i| picker.entries[i].session_id.as_deref() == Some("ses-aaa"))
+            .unwrap();
+        assert!(picker.archive_selected_to(&tmp));
+        let _ = std::fs::remove_file(&tmp);
+
+        // Parent links must still form a DAG (parent precedes child).
+        for (i, e) in picker.entries.iter().enumerate() {
+            assert!(
+                e.parent.is_none_or(|p| p < i),
+                "entry {i} ({}) has stale parent {:?} after archive",
+                e.label,
+                e.parent
+            );
+        }
+
+        // And the survivor's walk terminates (this spun forever pre-fix).
+        let pos = picker
+            .filtered
+            .iter()
+            .position(|&i| picker.entries[i].session_id.as_deref() == Some("ses-bbb"))
+            .unwrap();
+        picker.cursor = pos;
+        picker.activate_entry(picker.filtered[pos]);
+    }
+}

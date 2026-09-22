@@ -134,23 +134,24 @@ pub struct Payload {
 }
 
 impl Entry {
-    /// Stable identity across refreshes. The old cursor anchor was
-    /// `(kind, goto)`, but `goto` embeds volatile window/pane indexes
-    /// that shift when panes open/close — so the cursor lost its row
-    /// on every layout change. Pane ids and session ids are stable for
-    /// their lifetime; paths are stable for dirs/worktrees.
+    /// Stable identity across refreshes. Agents key by opencode session
+    /// id — never by pane: the same session keeps its row (and the cursor
+    /// holds) while viewers come and go, panes shift, or it slides into
+    /// dormant. Only synthetic rows (no session yet) fall back to pane.
+    /// Dirs/worktrees key by path. Identity and jump target are separate
+    /// concerns — goto still names the pane.
     pub fn stable_key(&self) -> (EntryType, String) {
         match self.kind {
             EntryType::Agent => {
-                if let Some(id) = self
+                if let Some(id) = self.session_id.clone().filter(|s| !s.is_empty()) {
+                    (EntryType::Agent, format!("session:{id}"))
+                } else if let Some(id) = self
                     .goto
                     .as_ref()
                     .and_then(|g| g.pane_id.clone())
                     .filter(|s| !s.is_empty())
                 {
                     (EntryType::Agent, format!("pane:{id}"))
-                } else if let Some(id) = self.session_id.clone().filter(|s| !s.is_empty()) {
-                    (EntryType::Agent, format!("session:{id}"))
                 } else {
                     (EntryType::Agent, format!("{}:{}", self.path.display(), self.label))
                 }

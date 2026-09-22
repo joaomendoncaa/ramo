@@ -119,7 +119,11 @@ impl GitCache {
         self.cached(&self.diffs, path, CACHE_TTL_MS, || self.compute_changes(path))
     }
     pub fn worktrees(&self, path: &Path) -> Vec<WorktreeInfo> {
+        // ponytail: exists-filter, not prune — `rm -rf` leaves `prunable` rows in `git worktree list`
         self.cached(&self.worktrees, path, WORKTREE_CACHE_TTL_MS, || self.list_worktrees(path))
+            .into_iter()
+            .filter(|wt| wt.is_main || wt.path.is_dir())
+            .collect()
     }
     pub fn branch(&self, path: &Path) -> Option<String> {
         self.cached(&self.branches, path, CACHE_TTL_MS, || self.compute_branch(path))

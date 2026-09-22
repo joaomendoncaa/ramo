@@ -36,6 +36,14 @@ fn main() -> io::Result<()> {
             agents::run_agents();
             return Ok(());
         }
+        Command::Archive => {
+            ramo::builder::run_archive_list();
+            return Ok(());
+        }
+        Command::Unarchive { ids, all } => {
+            ramo::builder::run_unarchive(&ids, all);
+            return Ok(());
+        }
         Command::Focus {
             session,
             pane_id,
@@ -87,30 +95,40 @@ fn main() -> io::Result<()> {
 
     picker.schedule_initial_fetch(cli.overrides);
 
-    loop {
+    // Restore the tty (and close the popup) before switching sessions:
+    // switching while the TUI still owns the terminal wedged the client.
+    let exit_goto: Option<model::Goto> = loop {
         screen.draw(|f| picker.render(f, &config))?;
         screen.poll_and_handle_events(&mut picker)?;
 
         match picker.tick() {
-            picker::Signal::Close => break,
+            picker::Signal::Close => break None,
             picker::Signal::Goto(goto) => {
-                if tmux::is_current_session(&goto.session) {
-                    tmux::select_agent_pane(
-                        &tmux::resolve_session(&goto.session),
-                        goto.window,
-                        goto.pane,
-                        goto.pane_id.as_deref(),
-                    );
-                } else {
-                    tmux::goto(&goto);
-                }
                 if picker.quit {
-                    break;
+                    break Some(goto);
                 }
+                perform_goto(&goto);
             }
             _ => {}
         }
+    };
+    drop(screen);
+    if let Some(goto) = exit_goto {
+        perform_goto(&goto);
     }
 
     Ok(())
+}
+
+fn perform_goto(goto: &model::Goto) {
+    if tmux::is_current_session(&goto.session) {
+        tmux::select_agent_pane(
+            &tmux::resolve_session(&goto.session),
+            goto.window,
+            goto.pane,
+            goto.pane_id.as_deref(),
+        );
+    } else {
+        tmux::goto(&goto);
+    }
 }

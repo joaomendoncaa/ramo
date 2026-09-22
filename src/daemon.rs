@@ -511,7 +511,6 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     broadcast(&data, &clients);
                     if last_cache_save.elapsed() > CACHE_SAVE_DEBOUNCE {
                         save_persisted_cache(&builder);
-                        report::save(&builder.reports());
                         if let Ok(d) = data.read() {
                             save_persisted_payload(&d);
                         }
@@ -595,7 +594,6 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                 {
                     info!("idle timeout reached, shutting down daemon");
                     save_persisted_cache(&builder);
-                    report::save(&builder.reports());
                     if let Ok(d) = data.read() {
                         save_persisted_payload(&d);
                     }

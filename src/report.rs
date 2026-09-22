@@ -41,8 +41,11 @@ fn persist_path() -> std::path::PathBuf {
     crate::logs::state_dir().join("reports.json")
 }
 
-fn ttl_for(id: &str) -> Duration {
-    if id.is_empty() { EMPTY_TTL } else { REPORT_TTL }
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // Reports live in memory but the daemon is routinely respawned — every
@@ -65,10 +68,7 @@ pub fn load() -> ReportMap {
 pub fn save_to(path: &std::path::Path, reports: &ReportMap) {
     let snapshot: HashMap<String, (String, u64)> = match reports.lock() {
         Ok(map) => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let now = now_secs();
             map.iter()
                 .map(|(k, (id, _))| (k.clone(), (id.clone(), now)))
                 .collect()
@@ -99,15 +99,13 @@ pub fn load_from(path: &std::path::Path) -> ReportMap {
     else {
         return reports;
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = now_secs();
     if let Ok(mut map) = reports.lock() {
         for (pane, (id, at)) in stored {
             // Drop by age: a pane id reused after a tmux server restart
             // must not ghost an old session, and dead reporters stop pinning.
-            if now.saturating_sub(at) < ttl_for(&id).as_secs() && !pane.is_empty() {
+            let ttl = if id.is_empty() { EMPTY_TTL } else { REPORT_TTL };
+            if now.saturating_sub(at) < ttl.as_secs() && !pane.is_empty() {
                 map.insert(pane, (id, Instant::now()));
             }
         }

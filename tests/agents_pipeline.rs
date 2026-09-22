@@ -124,6 +124,7 @@ fn live_panes_bind_exact_reported_sessions() {
             pane("beta", 2, 0, "%22", &fx.beta),
         ],
         &[sess("ses-a", "Alpha work", &fx.alpha, true), sess("ses-b", "Beta work", &fx.beta, false)],
+        None,
     );
     let live = live_agents_of(&entries);
     assert_eq!(live.len(), 2, "both panes listed: {entries:?}");
@@ -155,6 +156,7 @@ fn missing_report_is_synthetic_never_another_title() {
             pane("alpha", 1, 1, "%99", &fx.alpha),
         ],
         &[sess("ses-a", "Alpha work", &fx.alpha, false)],
+        None,
     );
     let live = live_agents_of(&entries);
     assert_eq!(live.len(), 2);
@@ -177,6 +179,7 @@ fn unknown_reported_id_is_synthetic() {
         &[tmux_session("alpha", &fx.alpha)],
         &[pane("alpha", 1, 0, "%11", &fx.alpha)],
         &[sess("ses-a", "Alpha work", &fx.alpha, false)],
+        None,
     );
     let live = live_agents_of(&entries);
     assert_eq!(live.len(), 1);
@@ -201,6 +204,7 @@ fn index_shift_keeps_identity_order_and_keys() {
             pane("alpha", 1, 1, "%22", &fx.alpha),
         ],
         &api,
+        None,
     );
     // Panes open/close around them: window/pane indexes shift, pane ids
     // (stable for the pane lifetime) do not.
@@ -212,6 +216,7 @@ fn index_shift_keeps_identity_order_and_keys() {
             pane("alpha", 3, 5, "%22", &fx.alpha),
         ],
         &api,
+        None,
     );
     let keys = |es: &[ramo::model::Entry]| {
         live_agents_of(es)
@@ -236,8 +241,8 @@ fn rebuild_is_byte_stable() {
     let sessions = vec![tmux_session("alpha", &fx.alpha)];
     let panes = vec![pane("alpha", 1, 0, "%11", &fx.alpha)];
     let api = vec![sess("ses-a", "Alpha work", &fx.alpha, true)];
-    let a = b.build_with(&fx.config, &sessions, &panes, &api);
-    let c = b.build_with(&fx.config, &sessions, &panes, &api);
+    let a = b.build_with(&fx.config, &sessions, &panes, &api, None);
+    let c = b.build_with(&fx.config, &sessions, &panes, &api, None);
     assert_eq!(
         serde_json::to_vec(&a).unwrap(),
         serde_json::to_vec(&c).unwrap(),
@@ -259,7 +264,7 @@ fn recency_change_does_not_reorder() {
         sess("ses-a", "Alpha work", &fx.alpha, false),
         sess("ses-b", "Beta work", &fx.alpha, false),
     ];
-    let _ = b.build_with(&fx.config, &sessions, &live_panes, &api);
+    let _ = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
     let order = |es: &[ramo::model::Entry]| {
         agents_of(es)
             .iter()
@@ -268,11 +273,11 @@ fn recency_change_does_not_reorder() {
     };
     api[0].time_updated = 1_800_000_000;
     api[1].time_updated = 1_900_000_001;
-    let first = b.build_with(&fx.config, &sessions, &[], &api);
+    let first = b.build_with(&fx.config, &sessions, &[], &api, None);
     assert_eq!(order(&first), vec!["ses-a".to_string(), "ses-b".to_string()]);
     // ses-a gets a new message — recency would flip it on top.
     api[0].time_updated = 1_999_999_999;
-    let second = b.build_with(&fx.config, &sessions, &[], &api);
+    let second = b.build_with(&fx.config, &sessions, &[], &api, None);
     assert_eq!(
         order(&second),
         order(&first),
@@ -290,10 +295,10 @@ fn closed_pane_becomes_dormant_once_seen() {
         sess("ses-a", "Alpha work", &fx.alpha, false),
         sess("ses-never", "Never opened", &fx.alpha, false),
     ];
-    let live = b.build_with(&fx.config, &sessions, &live_panes, &api);
+    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
     assert!(live_agents_of(&live).iter().any(|e| e.label == "Alpha work"));
     // Pane closed (or `/new` moved on): no panes at all now.
-    let after = b.build_with(&fx.config, &sessions, &[], &api);
+    let after = b.build_with(&fx.config, &sessions, &[], &api, None);
     let agents = agents_of(&after);
     assert_eq!(agents.len(), 1, "seen session lingers once, history stays out");
     assert_eq!(agents[0].label, "Alpha work");
@@ -308,14 +313,172 @@ fn closed_dir_hides_dormant_agents() {
     let sessions = vec![tmux_session("alpha", &fx.alpha)];
     let live_panes = vec![pane("alpha", 1, 0, "%11", &fx.alpha)];
     let api = vec![sess("ses-a", "Alpha work", &fx.alpha, false)];
-    let live = b.build_with(&fx.config, &sessions, &live_panes, &api);
+    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
     assert!(live_agents_of(&live).iter().any(|e| e.label == "Alpha work"));
     // Dir itself closed (no tmux session, no panes): dormant stays out.
-    let after = b.build_with(&fx.config, &[], &[], &api);
+    let after = b.build_with(&fx.config, &[], &[], &api, None);
     assert!(
         agents_of(&after).is_empty(),
         "closed dir shows no agents: {after:?}"
     );
+}
+
+#[test]
+fn archived_ids_stay_out_of_dormant() {
+    let fx = fixture();
+    let b = builder_with_reports(&[("%11", "ses-a")]);
+    let sessions = vec![tmux_session("alpha", &fx.alpha)];
+    let live_panes = vec![pane("alpha", 1, 0, "%11", &fx.alpha)];
+    let api = vec![sess("ses-a", "Alpha work", &fx.alpha, false)];
+    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
+    assert!(live_agents_of(&live).iter().any(|e| e.label == "Alpha work"));
+    // Pane closed: dormant would list it — but the user hid it.
+    b.archive("ses-a");
+    let after = b.build_with(&fx.config, &sessions, &[], &api, None);
+    assert!(
+        agents_of(&after).is_empty(),
+        "archived session stays hidden: {after:?}"
+    );
+}
+
+#[test]
+fn live_panes_ignore_archive() {
+    // Hiding never ghosts an open pane: live rows always show.
+    let fx = fixture();
+    let b = builder_with_reports(&[("%11", "ses-a")]);
+    b.archive("ses-a");
+    let entries = b.build_with(
+        &fx.config,
+        &[tmux_session("alpha", &fx.alpha)],
+        &[pane("alpha", 1, 0, "%11", &fx.alpha)],
+        &[sess("ses-a", "Alpha work", &fx.alpha, true)],
+        None,
+    );
+    assert_eq!(live_agents_of(&entries).len(), 1);
+}
+
+#[test]
+fn archived_file_round_trip() {
+    let dir = tmp_root();
+    let path = dir.join("archived.json");
+    let mut map = HashMap::new();
+    map.insert("ses-a".to_string(), "Alpha work".to_string());
+    ramo::builder::save_archived_to(&path, &map);
+    let back = ramo::builder::load_archived_from(&path);
+    assert_eq!(back.get("ses-a").map(String::as_str), Some("Alpha work"));
+    assert!(ramo::builder::load_archived_from(&dir.join("missing.json")).is_empty());
+}
+
+#[test]
+fn picker_archive_hides_dormant_row_and_persists() {
+    use ramo::model::{Entry, Payload};
+    use ramo::picker::Picker;
+
+    let dir = tmp_root();
+    let path = dir.join("archived.json");
+    let mut agent = Entry {
+        kind: EntryType::Agent,
+        label: "Alpha work".into(),
+        path: "/tmp/ramo-archive-test/alpha".into(),
+        changes: None,
+        branch: None,
+        is_open: false,
+        is_running: false,
+        pending: false,
+        depth: 1,
+        ancestors: vec![],
+        is_last: true,
+        search_text: "alpha Alpha work".into(),
+        goto: None,
+        parent: None,
+        connector: String::new(),
+        search_text_lower: "alpha alpha work".into(),
+        session_id: Some("ses-a".into()),
+    };
+    agent.compute_connector();
+    let config = Config::default();
+    let mut picker = Picker::new(Payload {
+        entries: vec![agent],
+        config: config.clone(),
+        feedbacks: vec![],
+        entries_found: 1,
+    });
+    assert!(picker.archive_selected_to(&path));
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| picker.render(f, &config)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let (w, h) = (buf.area.width, buf.area.height);
+    let mut text = String::new();
+    for y in 0..h {
+        for x in 0..w {
+            text.push_str(buf[(x, y)].symbol());
+        }
+    }
+    assert!(!text.contains("Alpha work"), "dormant row removed optimistically");
+    assert!(!text.contains("archived"), "archiving is silent");
+    let back = ramo::builder::load_archived_from(&path);
+    assert_eq!(back.get("ses-a").map(String::as_str), Some("Alpha work"));
+}
+
+#[test]
+fn picker_archive_keeps_live_row() {
+    use ramo::model::{Entry, Goto, Payload};
+    use ramo::picker::Picker;
+
+    let dir = tmp_root();
+    let path = dir.join("archived.json");
+    let mut agent = Entry {
+        kind: EntryType::Agent,
+        label: "Alpha work".into(),
+        path: "/tmp/ramo-archive-test/alpha".into(),
+        changes: None,
+        branch: None,
+        is_open: false,
+        is_running: true,
+        pending: false,
+        depth: 1,
+        ancestors: vec![],
+        is_last: true,
+        search_text: "alpha Alpha work".into(),
+        goto: Some(Goto {
+            session: "alpha".into(),
+            path: "/tmp/ramo-archive-test/alpha".into(),
+            window: Some(1),
+            pane: Some(0),
+            pane_id: Some("%11".into()),
+        }),
+        parent: None,
+        connector: String::new(),
+        search_text_lower: "alpha alpha work".into(),
+        session_id: Some("ses-a".into()),
+    };
+    agent.compute_connector();
+    let config = Config::default();
+    let mut picker = Picker::new(Payload {
+        entries: vec![agent],
+        config: config.clone(),
+        feedbacks: vec![],
+        entries_found: 1,
+    });
+    assert!(picker.archive_selected_to(&path));
+    // Recorded for when the pane closes, but the open pane stays visible.
+    assert_eq!(
+        ramo::builder::load_archived_from(&path)
+            .get("ses-a")
+            .map(String::as_str),
+        Some("Alpha work")
+    );
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| picker.render(f, &config)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let (w, h) = (buf.area.width, buf.area.height);
+    let mut text = String::new();
+    for y in 0..h {
+        for x in 0..w {
+            text.push_str(buf[(x, y)].symbol());
+        }
+    }
+    assert!(text.contains("Alpha work"), "live pane stays until closed");
 }
 
 #[test]
@@ -329,21 +492,14 @@ fn daemon_respawn_keeps_live_bindings() {
     let api = vec![sess("ses-a", "Alpha work", &fx.alpha, true)];
 
     let a = builder_with_reports(&[("%11", "ses-a")]);
-    let before = a.build_with(&fx.config, &sessions, &panes, &api);
+    let before = a.build_with(&fx.config, &sessions, &panes, &api, None);
     assert_eq!(live_agents_of(&before).len(), 1);
 
     let path = fx._root.join("reports.json");
     report::save_to(&path, &a.reports());
     let b = TreeBuilder::new(report::load_from(&path));
-    let after = b.build_with(&fx.config, &sessions, &panes, &api);
+    let after = b.build_with(&fx.config, &sessions, &panes, &api, None);
 
-    let titles = |es: &[ramo::model::Entry]| {
-        live_agents_of(es)
-            .iter()
-            .map(|e| e.label.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(titles(&after), vec!["Alpha work".to_string()]);
     assert_eq!(
         serde_json::to_vec(&before).unwrap(),
         serde_json::to_vec(&after).unwrap(),
@@ -352,7 +508,7 @@ fn daemon_respawn_keeps_live_bindings() {
 }
 
 #[test]
-fn unseen_history_stays_out() {
+fn unseen_sessions_are_archived_by_default() {
     let fx = fixture();
     let b = builder_with_reports(&[]);
     let entries = b.build_with(
@@ -360,10 +516,145 @@ fn unseen_history_stays_out() {
         &[tmux_session("alpha", &fx.alpha)],
         &[],
         &[sess("ses-old", "Ancient history", &fx.alpha, false)],
+        None,
     );
     assert!(
         agents_of(&entries).is_empty(),
-        "full API history must not flood the list before ramo sees it open"
+        "unseen history is archived until ramo sees it live"
+    );
+}
+
+#[test]
+fn shared_session_collapses_to_home_viewer() {
+    // Same session on two screens (move kept the old viewer, switch added
+    // a new one) rendered two identical live rows. One row per session;
+    // jump target is the viewer at home.
+    let fx = fixture();
+    let b = builder_with_reports(&[("%54", "ses-x"), ("%57", "ses-x")]);
+    let entries = b.build_with(
+        &fx.config,
+        &[tmux_session("alpha", &fx.alpha), tmux_session("beta", &fx.beta)],
+        &[
+            pane("alpha", 4, 1, "%54", &fx.alpha),
+            pane("beta", 2, 1, "%57", &fx.beta),
+        ],
+        &[sess("ses-x", "Shared", &fx.beta, false)],
+        None,
+    );
+    let live = live_agents_of(&entries);
+    assert_eq!(live.len(), 1, "one row per session: {entries:?}");
+    assert_eq!(live[0].label, "Shared");
+    assert_eq!(live[0].session_id.as_deref(), Some("ses-x"));
+    assert_eq!(
+        live[0].goto.as_ref().unwrap().pane_id.as_deref(),
+        Some("%57"),
+        "home viewer wins"
+    );
+}
+
+#[test]
+fn shared_session_no_home_is_deterministic() {
+    // Both viewers away: winner is stable-first, identical every rebuild.
+    let fx = fixture();
+    let b = builder_with_reports(&[("%54", "ses-x"), ("%57", "ses-x")]);
+    // Session lives in scanned beta, far from both alpha viewers.
+    let sessions = vec![
+        tmux_session("alpha", &fx.alpha),
+        tmux_session("beta", &fx.beta),
+    ];
+    let panes = vec![
+        pane("alpha", 4, 1, "%54", &fx.alpha),
+        pane("alpha", 2, 1, "%57", &fx.alpha),
+    ];
+    let api = vec![sess("ses-x", "Shared", &fx.beta, false)];
+    let first = b.build_with(&fx.config, &sessions, &panes, &api, None);
+    let second = b.build_with(&fx.config, &sessions, &panes, &api, None);
+    for entries in [&first, &second] {
+        assert_eq!(live_agents_of(entries).len(), 1);
+    }
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&second).unwrap()
+    );
+    // Stable-first by (session_name, pane_id): both in alpha, %54 wins.
+    assert_eq!(
+        live_agents_of(&first)[0]
+            .goto
+            .as_ref()
+            .unwrap()
+            .pane_id
+            .as_deref(),
+        Some("%54")
+    );
+}
+
+#[test]
+fn shared_session_prefers_current_viewer() {
+    // Opened from alpha with viewers in alpha and beta: goto stays where
+    // you are, even though the session lives in beta.
+    let fx = fixture();
+    let b = builder_with_reports(&[("%54", "ses-x"), ("%57", "ses-x")]);
+    let entries = b.build_with(
+        &fx.config,
+        &[tmux_session("alpha", &fx.alpha), tmux_session("beta", &fx.beta)],
+        &[
+            pane("alpha", 4, 1, "%54", &fx.alpha),
+            pane("beta", 2, 1, "%57", &fx.beta),
+        ],
+        &[sess("ses-x", "Shared", &fx.beta, false)],
+        Some("alpha"),
+    );
+    let live = live_agents_of(&entries);
+    assert_eq!(live.len(), 1);
+    assert_eq!(
+        live[0].goto.as_ref().unwrap().pane_id.as_deref(),
+        Some("%54"),
+        "current session beats home"
+    );
+}
+
+#[test]
+fn shared_session_closed_winner_falls_to_other() {
+    // Winner pane closed: the next rebuild elects the survivor, same row.
+    let fx = fixture();
+    let b = builder_with_reports(&[("%54", "ses-x"), ("%57", "ses-x")]);
+    let sessions = vec![
+        tmux_session("alpha", &fx.alpha),
+        tmux_session("beta", &fx.beta),
+    ];
+    let both = vec![
+        pane("alpha", 4, 1, "%54", &fx.alpha),
+        pane("beta", 2, 1, "%57", &fx.beta),
+    ];
+    let api = vec![sess("ses-x", "Shared", &fx.beta, false)];
+    let before = b.build_with(&fx.config, &sessions, &both, &api, Some("alpha"));
+    assert_eq!(
+        live_agents_of(&before)[0]
+            .goto
+            .as_ref()
+            .unwrap()
+            .pane_id
+            .as_deref(),
+        Some("%54")
+    );
+    // %54 closed: report pruned, survivor takes the row, identity holds.
+    let after = b.build_with(
+        &fx.config,
+        &sessions,
+        &[pane("beta", 2, 1, "%57", &fx.beta)],
+        &api,
+        Some("alpha"),
+    );
+    let live = live_agents_of(&after);
+    assert_eq!(live.len(), 1);
+    assert_eq!(
+        live[0].goto.as_ref().unwrap().pane_id.as_deref(),
+        Some("%57")
+    );
+    assert_eq!(
+        live[0].stable_key(),
+        live_agents_of(&before)[0].stable_key(),
+        "cursor holds across viewer failover"
     );
 }
 
@@ -378,6 +669,7 @@ fn non_opencode_panes_are_not_agents() {
         &[tmux_session("alpha", &fx.alpha)],
         &[shell],
         &[sess("ses-a", "Alpha work", &fx.alpha, false)],
+        None,
     );
     assert!(
         agents_of(&entries).is_empty(),
