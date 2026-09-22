@@ -115,6 +115,12 @@ pub struct Entry {
     pub parent: Option<usize>,
     pub connector: String,
     pub search_text_lower: String,
+    // Stable opencode session id for Agent rows (live + dormant).
+    // Entries previously carried only the title, so two sessions with
+    // the same title were indistinguishable and dormant rows had no
+    // stable cursor key. Additive: old payloads decode as None.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -128,6 +134,31 @@ pub struct Payload {
 }
 
 impl Entry {
+    /// Stable identity across refreshes. The old cursor anchor was
+    /// `(kind, goto)`, but `goto` embeds volatile window/pane indexes
+    /// that shift when panes open/close — so the cursor lost its row
+    /// on every layout change. Pane ids and session ids are stable for
+    /// their lifetime; paths are stable for dirs/worktrees.
+    pub fn stable_key(&self) -> (EntryType, String) {
+        match self.kind {
+            EntryType::Agent => {
+                if let Some(id) = self
+                    .goto
+                    .as_ref()
+                    .and_then(|g| g.pane_id.clone())
+                    .filter(|s| !s.is_empty())
+                {
+                    (EntryType::Agent, format!("pane:{id}"))
+                } else if let Some(id) = self.session_id.clone().filter(|s| !s.is_empty()) {
+                    (EntryType::Agent, format!("session:{id}"))
+                } else {
+                    (EntryType::Agent, format!("{}:{}", self.path.display(), self.label))
+                }
+            }
+            _ => (self.kind.clone(), self.path.display().to_string()),
+        }
+    }
+
     pub fn connector(&self) -> &str {
         &self.connector
     }
@@ -168,6 +199,9 @@ impl Entry {
             EntryType::Agent => {
                 if self.is_running {
                     SPINNER[frame % SPINNER.len()]
+                } else if self.goto.is_none() {
+                    // Dormant session: present but not open in any pane.
+                    '○'
                 } else {
                     CHECKED
                 }

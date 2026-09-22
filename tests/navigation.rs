@@ -24,6 +24,7 @@ fn dir_entry(name: &str) -> Entry {
         parent: None,
         connector: String::new(),
         search_text_lower: name.to_lowercase(),
+        session_id: None,
     }
 }
 

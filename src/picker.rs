@@ -4,7 +4,7 @@ use crate::daemon;
 use crate::git;
 use crate::logs;
 use crate::model::{Entry, EntryType, FeedbackEntry, FeedbackType, Goto, Payload};
-use crate::tmux;
+use crate::integration::tmux;
 use ratatui::layout::Rect;
 use std::sync::mpsc;
 use std::thread;
@@ -160,7 +160,7 @@ impl Picker {
                     .filtered
                     .get(self.cursor)
                     .and_then(|&i| self.entries.get(i))
-                    .map(|e| (e.kind.clone(), e.goto.clone()));
+                    .map(|e| e.stable_key());
                 self.entries_found = payload.entries_found.max(payload.entries.len());
                 self.entries = payload.entries;
                 self.feedbacks = payload.feedbacks.clone();
@@ -181,10 +181,9 @@ impl Picker {
                     || (self.input.is_empty() && !self.touched)
                 {
                     self.cursor = self.find_initial_cursor();
-                } else if let Some((kind, goto)) = old_key.as_ref()
+                } else if let Some(key) = old_key.as_ref()
                     && let Some(pos) = self.filtered.iter().position(|&i| {
-                        let e = &self.entries[i];
-                        &e.kind == kind && &e.goto == goto
+                        self.entries[i].stable_key() == *key
                     })
                 {
                     self.cursor = pos;
@@ -265,7 +264,7 @@ impl Picker {
             return vec![];
         }
         let mut buttons = Vec::new();
-        if entry.is_open || entry.kind == EntryType::Agent {
+        if entry.goto.is_some() && (entry.is_open || entry.kind == EntryType::Agent) {
             let key = self.config.bind_command_session_kill.to_uppercase();
             buttons.push((format!("{key} Kill Session"), Action::KillSession));
         } else if entry.goto.is_some() {
@@ -411,7 +410,7 @@ impl Picker {
             .filtered
             .get(self.cursor)
             .and_then(|&i| self.entries.get(i))
-            .map(|e| (e.kind.clone(), e.goto.clone()));
+            .map(|e| e.stable_key());
         if let Some(last) = (0..self.entries.len())
             .rev()
             .find(|&i| self.entries[i].parent == Some(dir_idx) && self.entries[i].depth == 1)
@@ -447,6 +446,7 @@ impl Picker {
             parent: Some(dir_idx),
             connector: String::new(),
             search_text_lower: String::new(),
+            session_id: None,
         };
         ph.compute_connector();
         ph.search_text_lower = ph.search_text.to_lowercase();
@@ -456,11 +456,11 @@ impl Picker {
         }
         self.entries.insert(at, ph);
         self.filtered = self.filtered();
-        if let Some((kind, goto)) = cursor_id
+        if let Some(key) = cursor_id
             && let Some(pos) = self
                 .filtered
                 .iter()
-                .position(|&i| self.entries[i].kind == kind && self.entries[i].goto == goto)
+                .position(|&i| self.entries[i].stable_key() == key)
         {
             self.cursor = pos;
         }

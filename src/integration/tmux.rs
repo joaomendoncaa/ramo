@@ -43,7 +43,7 @@ pub fn snapshot() -> Snapshot {
     Snapshot { sessions, panes }
 }
 
-fn tmux_lines(args: &[&str]) -> Vec<String> {
+pub(crate) fn tmux_lines(args: &[&str]) -> Vec<String> {
     Command::new("tmux")
         .args(args)
         .output()
@@ -154,15 +154,17 @@ pub fn open_detached(action: &Goto) {
 // Coordinates go stale between list-build and Enter (panes open/close
 // while agents work, shifting window/pane indexes). `%id` is stable for
 // the pane's lifetime, so re-resolve the live coordinates from it at
-// goto time; fall back to the stored ones when unknown or dead.
+// goto time; fall back to the stored ones when unknown or dead. The flag
+// tells whether the coordinates are live: callers must never act on a
+// dead pane's stored window index, it may now point at a stranger window.
 pub(crate) fn fresh_target(
     session: &str,
     window: Option<usize>,
     pane: Option<usize>,
     pane_id: Option<&str>,
-) -> (String, Option<usize>, Option<usize>) {
+) -> (String, Option<usize>, Option<usize>, bool) {
     let Some(id) = pane_id.filter(|s| !s.is_empty()) else {
-        return (session.to_string(), window, pane);
+        return (session.to_string(), window, pane, false);
     };
     let out = Command::new("tmux")
         .args([
@@ -180,38 +182,40 @@ pub(crate) fn fresh_target(
     if f.len() == 3 && !f[0].is_empty()
         && let (Ok(w), Ok(p)) = (f[1].parse(), f[2].parse())
     {
-        return (f[0].to_string(), Some(w), Some(p));
+        return (f[0].to_string(), Some(w), Some(p), true);
     }
-    (session.to_string(), window, pane)
+    (session.to_string(), window, pane, false)
 }
 
 // `%id` is stable for the pane's lifetime; indexes shift when panes
 // open/close between list-build and click, so prefer it when known.
 // `select-pane` alone leaves the attached client on its current window,
-// so the target window is selected first in both paths.
+// so the live window is selected first. A dead pane's stored index is
+// never trusted (it may name a stranger window now) — land on the
+// session instead.
 pub fn select_agent_pane(
     session: &str,
     window: Option<usize>,
     pane: Option<usize>,
     pane_id: Option<&str>,
 ) {
-    let (session, window, pane) = fresh_target(session, window, pane, pane_id);
-    if let Some(window) = window {
+    let (session, window, pane, live) = fresh_target(session, window, pane, pane_id);
+    let Some(id) = pane_id.filter(|s| !s.is_empty()) else {
+        if let (Some(window), Some(pane)) = (window, pane) {
+            select_pane(&session, window, pane);
+        }
+        return;
+    };
+    if live && let Some(window) = window {
         let _ = Command::new("tmux")
             .args(["select-window", "-t", &format!("={session}:{window}")])
             .stderr(Stdio::null())
             .status();
     }
-    if let Some(id) = pane_id.filter(|s| !s.is_empty()) {
-        let _ = Command::new("tmux")
-            .args(["select-pane", "-t", id])
-            .stderr(Stdio::null())
-            .status();
-        return;
-    }
-    if let (Some(window), Some(pane)) = (window, pane) {
-        select_pane(&session, window, pane);
-    }
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", id])
+        .stderr(Stdio::null())
+        .status();
 }
 
 pub fn select_pane(session: &str, window: usize, pane: usize) {
@@ -295,13 +299,14 @@ pub fn kill_session(name: &str) {
 mod tests {
     use super::*;
 
-    // Dead/unknown pane id: no tmux lookup succeeds, stored coords win.
+    // Dead/unknown pane id: no tmux lookup succeeds, stored coords win,
+    // flagged as stale.
     #[test]
     fn fresh_target_falls_back_when_pane_dead() {
-        let (s, w, p) = fresh_target("sess", Some(3), Some(1), Some("%999999"));
-        assert_eq!((s.as_str(), w, p), ("sess", Some(3), Some(1)));
-        let (s, w, p) = fresh_target("sess", Some(3), Some(1), None);
-        assert_eq!((s.as_str(), w, p), ("sess", Some(3), Some(1)));
+        let (s, w, p, live) = fresh_target("sess", Some(3), Some(1), Some("%999999"));
+        assert_eq!((s.as_str(), w, p, live), ("sess", Some(3), Some(1), false));
+        let (s, w, p, live) = fresh_target("sess", Some(3), Some(1), None);
+        assert_eq!((s.as_str(), w, p, live), ("sess", Some(3), Some(1), false));
     }
 }
 
@@ -314,9 +319,14 @@ pub fn kill_window(session: &str, window: usize) {
 
 // Agent kill with live coordinates: a stored window index may have
 // shifted since list-build, and killing the wrong window is worse
-// than jumping to it.
+// than jumping to it. A dead pane kills nothing — its stored index may
+// name a stranger window holding other agents, and the agent itself is
+// already gone.
 pub fn kill_agent(session: &str, window: Option<usize>, pane_id: Option<&str>) {
-    let (session, window, _) = fresh_target(session, window, None, pane_id);
+    let (session, window, _, live) = fresh_target(session, window, None, pane_id);
+    if pane_id.is_some_and(|s| !s.is_empty()) && !live {
+        return;
+    }
     if let Some(w) = window {
         kill_window(&session, w);
     } else {

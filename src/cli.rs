@@ -20,6 +20,13 @@ pub enum Command {
     Run,
     Daemon(Daemon),
     Plugin(Plugin),
+    Agents,
+    Focus {
+        session: String,
+        pane_id: String,
+        window: String,
+        pane: String,
+    },
     Kill,
     Help,
     Config,
@@ -58,6 +65,17 @@ impl Cli {
                     };
                 }
                 "kill" => command = Command::Kill,
+                "agents" => command = Command::Agents,
+                "focus" => {
+                    let get = |k: usize| args.get(i + k).cloned().unwrap_or_default();
+                    command = Command::Focus {
+                        session: get(1),
+                        pane_id: get(2),
+                        window: get(3),
+                        pane: get(4),
+                    };
+                    i += 4;
+                }
                 "plugin" => {
                     i += 1;
                     command = if i < args.len() {
@@ -133,6 +151,8 @@ ramo purge                Remove daemon service and state (keeps config)\n\
 ramo purge --with-config  Remove daemon service, state and config\n\
 \n\
 ramo kill           Alias for daemon kill\n\
+ramo agents         Print live agents as JSON (for bars/widgets)\n\
+ramo focus SESSION PANE_ID WINDOW PANE   Jump to an agent pane (for bars/widgets)\n\
 \n\
 ramo plugin install Install opencode TUI plugin for exact per-pane session tracking\n\
 \n\

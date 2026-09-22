@@ -1,3 +1,6 @@
-// Third-party integrations, one file per agent: session listing plus its
-// TUI plugin installer and assets (see assets/opencode/).
+// External surfaces ramo talks to: agents (session listing plus TUI
+// plugin installer and assets, see assets/opencode/), the tmux
+// multiplexer, and the Hyprland compositor.
+pub mod hyprland;
 pub mod opencode;
+pub mod tmux;

@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod builder;
 pub mod cli;
 pub mod clickable;
@@ -16,5 +17,4 @@ pub mod renderer;
 pub mod report;
 pub mod service;
 pub mod terminal;
-pub mod tmux;
 pub mod util;

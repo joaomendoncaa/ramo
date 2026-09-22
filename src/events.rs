@@ -1,7 +1,7 @@
 use crate::clickable::Action;
 use crate::config::Config;
 use crate::picker::{Mode, Picker};
-use crate::tmux;
+use crate::integration::tmux;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 

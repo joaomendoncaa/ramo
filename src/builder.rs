@@ -5,14 +5,19 @@ use crate::model::{
     Changes, Entry, EntryType, Goto, Opencode, TmuxPane, TmuxSession, WorktreeInfo,
 };
 use crate::report;
-use crate::tmux;
+use crate::integration::tmux;
 use crate::util;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub struct TreeBuilder {
     git_cache: GitCache,
     reports: report::ReportMap,
+    // Session ids ever shown live since tracking began. Only these can
+    // go dormant — the API's full history stays out of the list until
+    // ramo actually sees a session open. Survives restarts via cache.json.
+    seen: Mutex<HashSet<String>>,
 }
 
 impl TreeBuilder {
@@ -20,7 +25,20 @@ impl TreeBuilder {
         TreeBuilder {
             git_cache: GitCache::new(),
             reports,
+            seen: Mutex::new(HashSet::new()),
         }
+    }
+
+    pub fn load_seen(&self, ids: &[String]) {
+        self.seen.lock().unwrap().extend(ids.iter().cloned());
+    }
+
+    pub fn seen_snapshot(&self) -> Vec<String> {
+        self.seen.lock().unwrap().iter().cloned().collect()
+    }
+
+    pub fn reports(&self) -> report::ReportMap {
+        self.reports.clone()
     }
 
     pub fn load_disk_cache(&self, cache: &crate::git::DiskCache) {
@@ -30,29 +48,65 @@ impl TreeBuilder {
         self.git_cache.to_disk()
     }
 
-    pub fn build(&self, config: &Config) -> Vec<Entry> {
+    pub fn build(&self, config: &Config) -> Option<Vec<Entry>> {
         let (tmux_snapshot, oc_sessions) = std::thread::scope(|s| {
             let tmux_h = s.spawn(tmux::snapshot);
             let oc_h = s.spawn(|| {
-                opencode::sessions(&config.opencode_agents_ignored).unwrap_or_default()
+                opencode::sessions(&config.opencode_agents_ignored)
             });
             (tmux_h.join().unwrap(), oc_h.join().unwrap())
         });
-        let sessions = tmux_snapshot.sessions;
-        let panes = tmux_snapshot.panes;
+        // A transient `opencode api` failure must not wipe the list for a
+        // frame (every pane would flash synthetic, then snap back). The
+        // daemon keeps serving the previous payload instead.
+        let oc_sessions = oc_sessions?;
+        Some(self.build_with(
+            config,
+            &tmux_snapshot.sessions,
+            &tmux_snapshot.panes,
+            &oc_sessions,
+        ))
+    }
 
-        let oc_panes = tmux::opencode_panes(&panes);
+    /// Pure assembly from already-fetched inputs. Headless tests drive
+    /// the whole agent pipeline through here with fake tmux panes,
+    /// fake API sessions and real reports — no tmux/opencode binaries.
+    pub fn build_with(
+        &self,
+        config: &Config,
+        sessions: &[TmuxSession],
+        panes: &[TmuxPane],
+        oc_sessions: &[Opencode],
+    ) -> Vec<Entry> {
+
+        let oc_panes = tmux::opencode_panes(panes);
         // Drop reports for dead panes so a reused pane id can't ghost.
         report::prune(
             &self.reports,
             &panes.iter().map(|p| p.pane_id.clone()).collect(),
         );
-        let pane_sessions = match_panes_to_sessions(&oc_panes, &oc_sessions, &self.reports);
+        let (pane_sessions, bound) =
+            match_panes_to_sessions(&oc_panes, oc_sessions, &self.reports);
+        // Sessions no live pane binds (exited to shell, pane closed,
+        // `/new` moved the pane on) stay listed as dormant rows under
+        // their directory — but only sessions ramo has actually seen
+        // open. Everything older than tracking stays out until opened.
+        self.seen.lock().unwrap().extend(bound.iter().cloned());
+        let seen = self.seen.lock().unwrap();
+        let mut dormant: Vec<Opencode> = oc_sessions
+            .iter()
+            .filter(|s| !bound.contains(&s.id) && seen.contains(&s.id))
+            .cloned()
+            .collect();
+        drop(seen);
+        // Stable by id: sorting by recency reordered rows under the
+        // cursor whenever any session updated mid-picker.
+        dormant.sort_by(|a, b| a.id.cmp(&b.id));
 
         let dirs = self.parse_directories(&config.path);
         let open: HashSet<PathBuf> = dirs
             .iter()
-            .filter(|d| dir_is_open(d, &sessions, &panes))
+            .filter(|d| dir_is_open(d, sessions, panes))
             .map(|d| d.path.clone())
             .collect();
 
@@ -141,12 +195,13 @@ impl TreeBuilder {
                 d,
                 git,
                 branch,
-                &sessions,
-                &panes,
+                sessions,
+                panes,
                 &pane_sessions,
+                &dormant,
             ));
         }
-        for s in tmux::list_external_sessions(&sessions, &covered_paths, &covered_names) {
+        for s in tmux::list_external_sessions(sessions, &covered_paths, &covered_names) {
             dir_entries.push(external_dir_entry(&s, &panes));
         }
 
@@ -353,6 +408,7 @@ fn build_dir_entry(
     sessions: &[TmuxSession],
     panes: &[TmuxPane],
     pane_sessions: &[PaneSession],
+    dormant: &[Opencode],
 ) -> DirEntry {
     let mut worktrees: Vec<WtEntry> = git
         .worktrees
@@ -373,6 +429,11 @@ fn build_dir_entry(
                     .unwrap_or_default(),
                 branch: git.worktree_branches.get(wi).cloned().flatten(),
                 sessions: wt_sessions,
+                dormant: dormant
+                    .iter()
+                    .filter(|s| is_in(&s.directory, &wt.path))
+                    .cloned()
+                    .collect(),
                 info: wt.clone(),
             }
         })
@@ -389,6 +450,17 @@ fn build_dir_entry(
         changes,
         branch,
         sessions: dir_sessions(dir, &git.worktrees, pane_sessions),
+        dormant: dormant
+            .iter()
+            .filter(|s| {
+                is_in(&s.directory, &dir.path)
+                    && !git
+                        .worktrees
+                        .iter()
+                        .any(|wt| is_in(&s.directory, &wt.path))
+            })
+            .cloned()
+            .collect(),
         worktrees,
     }
 }
@@ -402,6 +474,7 @@ fn external_dir_entry(s: &TmuxSession, _panes: &[TmuxPane]) -> DirEntry {
         branch: None,
         worktrees: vec![],
         sessions: vec![],
+        dormant: vec![],
     }
 }
 
@@ -446,6 +519,8 @@ fn push_agent_row(
     search_text: String,
     parent: Option<usize>,
 ) {
+    // Synthetic rows (no report yet) carry no session id — keyed by pane.
+    let session_id = (!ps.session.id.starts_with("synthetic:")).then(|| ps.session.id.clone());
     rows.push(finalize_entry(Entry {
         kind: EntryType::Agent,
         label: ps.session.title.clone(),
@@ -469,6 +544,38 @@ fn push_agent_row(
         parent,
         connector: String::new(),
         search_text_lower: String::new(),
+        session_id,
+    }));
+}
+
+fn push_dormant_row(
+    rows: &mut Vec<Entry>,
+    session: &Opencode,
+    depth: usize,
+    ancestors: Vec<bool>,
+    is_last: bool,
+    search_text: String,
+    parent: Option<usize>,
+) {
+    // Present but not open in any pane: no goto, Enter is a no-op.
+    rows.push(finalize_entry(Entry {
+        kind: EntryType::Agent,
+        label: session.title.clone(),
+        path: session.directory.clone(),
+        changes: None,
+        branch: None,
+        is_open: false,
+        is_running: false,
+        pending: false,
+        depth,
+        ancestors,
+        is_last,
+        search_text,
+        goto: None,
+        parent,
+        connector: String::new(),
+        search_text_lower: String::new(),
+        session_id: Some(session.id.clone()),
     }));
 }
 
@@ -506,8 +613,9 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
         parent: None,
         connector: String::new(),
         search_text_lower: String::new(),
+        session_id: None,
     }));
-    let total_children = entry.sessions.len() + entry.worktrees.len();
+    let total_children = entry.sessions.len() + entry.dormant.len() + entry.worktrees.len();
     if total_children == 0 {
         return;
     }
@@ -522,6 +630,19 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             vec![],
             is_last,
             format!("{} {}", entry.name, ps.session.title),
+            Some(dir_idx),
+        );
+    }
+    for s in &entry.dormant {
+        let is_last = child == total_children - 1;
+        child += 1;
+        push_dormant_row(
+            rows,
+            s,
+            1,
+            vec![],
+            is_last,
+            format!("{} {}", entry.name, s.title),
             Some(dir_idx),
         );
     }
@@ -562,16 +683,29 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             parent: Some(dir_idx),
             connector: String::new(),
             search_text_lower: String::new(),
+            session_id: None,
         }));
         let s_total = w.sessions.len();
+        let d_total = w.dormant.len();
         for (si, ps) in w.sessions.iter().enumerate() {
             push_agent_row(
                 rows,
                 ps,
                 2,
                 vec![is_last_dir],
-                si == s_total - 1,
+                si == s_total - 1 && d_total == 0,
                 format!("{} {} {}", entry.name, wt_name, ps.session.title),
+                Some(wt_idx),
+            );
+        }
+        for (di, s) in w.dormant.iter().enumerate() {
+            push_dormant_row(
+                rows,
+                s,
+                2,
+                vec![is_last_dir],
+                di == d_total - 1,
+                format!("{} {} {}", entry.name, wt_name, s.title),
                 Some(wt_idx),
             );
         }
@@ -645,16 +779,29 @@ fn push_wt_root(root: &WtRoot, is_last_root: bool, rows: &mut Vec<Entry>) {
         parent: None,
         connector: String::new(),
         search_text_lower: String::new(),
+        session_id: None,
     }));
     let s_total = root.wt.sessions.len();
+    let d_total = root.wt.dormant.len();
     for (si, ps) in root.wt.sessions.iter().enumerate() {
         push_agent_row(
             rows,
             ps,
             1,
             vec![],
-            si == s_total - 1,
+            si == s_total - 1 && d_total == 0,
             format!("{} {} {}", root.from_dir, root.label, ps.session.title),
+            Some(wt_idx),
+        );
+    }
+    for (di, s) in root.wt.dormant.iter().enumerate() {
+        push_dormant_row(
+            rows,
+            s,
+            1,
+            vec![],
+            di == d_total - 1,
+            format!("{} {} {}", root.from_dir, root.label, s.title),
             Some(wt_idx),
         );
     }
@@ -673,6 +820,7 @@ struct DirEntry {
     branch: Option<String>,
     worktrees: Vec<WtEntry>,
     sessions: Vec<PaneSession>,
+    dormant: Vec<Opencode>,
 }
 
 struct WtEntry {
@@ -681,20 +829,19 @@ struct WtEntry {
     branch: Option<String>,
     is_open: bool,
     sessions: Vec<PaneSession>,
+    dormant: Vec<Opencode>,
 }
 
 #[derive(Clone)]
-struct PaneSession {
-    pane: TmuxPane,
-    session: Opencode,
+pub(crate) struct PaneSession {
+    pub(crate) pane: TmuxPane,
+    pub(crate) session: Opencode,
 }
 
 fn synthetic(p: &TmuxPane) -> Opencode {
+    // Stable for the pane's lifetime (window/pane indexes shift).
     Opencode {
-        id: format!(
-            "synthetic:{}:{}:{}",
-            p.session_name, p.window_index, p.pane_index
-        ),
+        id: format!("synthetic:{}", p.pane_id),
         title: "New session".into(),
         directory: p.current_path.clone(),
         time_updated: p.activity,
@@ -703,49 +850,41 @@ fn synthetic(p: &TmuxPane) -> Opencode {
     }
 }
 
-fn match_panes_to_sessions(
+pub(crate) fn match_panes_to_sessions(
     panes: &[&TmuxPane],
     sessions: &[Opencode],
     reports: &report::ReportMap,
-) -> Vec<PaneSession> {
-    // a pane is an opencode pane iff `tmux::opencode_panes`
-    // classified it by `pane_current_command` the correlation to
-    // opencode's api is done in two layers. first the TUI plugin report:
-    // the plugin inside the pane sees switches and `/new` that emit
-    // nothing server-side, so a fresh report for the pane wins outright
-    // (hook authority). otherwise the most recently *viewed* session
-    // whose `directory` contains the pane's cwd (`updated` only moves on
-    // new messages, so it sticks to the previous session after `/new`
-    // or a TUI session switch).
-    // `is_running` is display-only (spinner), never a match key: a
-    // background agent must not steal the binding from what's on screen.
-    // The session's own `title`/`is_running` are used verbatim
-    let mut used = HashSet::new();
+) -> (Vec<PaneSession>, HashSet<String>) {
+    // Binding is report-or-nothing. A pane is an opencode pane iff
+    // `tmux::opencode_panes` classified it by `pane_current_command`;
+    // the TUI plugin report then names its session (hook authority: the
+    // plugin sees `/new` and session switches that emit nothing
+    // server-side). No recency guessing — a pane with no usable report
+    // gets a synthetic row, never another session's title. Sessions no
+    // pane binds stay listed as dormant rows under their directory.
+    //
+    // Stable order by pane identity: sorting by activity reordered rows
+    // under the cursor whenever any session ticked mid-picker.
     let mut sorted = panes.to_vec();
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.activity));
+    sorted.sort_by(|a, b| {
+        a.session_name
+            .cmp(&b.session_name)
+            .then(a.pane_id.cmp(&b.pane_id))
+    });
+    let mut consumed = HashSet::new();
     let mut out = Vec::with_capacity(sorted.len());
     for p in &sorted {
         let reported = (!p.pane_id.is_empty())
             .then(|| report::reported_session(reports, &p.pane_id))
             .flatten();
-        let recency = || {
-            sessions
-                .iter()
-                .filter(|s| !used.contains(&s.id) && is_in(&p.current_path, &s.directory))
-                .max_by_key(|s| (s.time_viewed, s.time_updated))
-        };
-        // Known session-less pane (fresh TUI): synthetic row, never a
-        // stale title. Unknown reported id: ignore, fall back to recency.
+        // Known session-less pane (fresh TUI): synthetic row. Unknown
+        // reported id (ended/no longer listed): synthetic too.
         let best = match reported.as_deref() {
-            Some("") => None,
-            Some(id) => sessions
-                .iter()
-                .find(|s| s.id == id && !used.contains(&s.id))
-                .or_else(recency),
-            None => recency(),
+            Some("") | None => None,
+            Some(id) => sessions.iter().find(|s| s.id == id),
         };
         if let Some(s) = best {
-            used.insert(s.id.clone());
+            consumed.insert(s.id.clone());
             out.push(PaneSession {
                 pane: (*p).clone(),
                 session: s.clone(),
@@ -757,7 +896,7 @@ fn match_panes_to_sessions(
             });
         }
     }
-    out
+    (out, consumed)
 }
 
 fn is_in(path: &Path, base: &Path) -> bool {

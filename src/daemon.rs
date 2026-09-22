@@ -60,6 +60,8 @@ const CACHE_SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
 #[derive(Serialize, Deserialize, Default)]
 struct PersistedCache {
     git: crate::git::DiskCache,
+    #[serde(default)]
+    seen: Vec<String>,
 }
 
 fn cache_path() -> PathBuf {
@@ -88,6 +90,7 @@ fn load_persisted_cache() -> Option<PersistedCache> {
 fn save_persisted_cache(builder: &TreeBuilder) {
     let cache = PersistedCache {
         git: builder.to_disk_cache(),
+        seen: builder.seen_snapshot(),
     };
     if let Ok(bytes) = serde_json::to_vec(&cache) {
         write_atomic(&cache_path(), &bytes);
@@ -233,13 +236,15 @@ fn build_payload(
     config_lock: &ConfigLock,
     feedback_lock: &FeedbackLock,
     builder: &TreeBuilder,
-) -> (Vec<u8>, usize) {
+) -> Option<(Vec<u8>, usize)> {
     let config = config_lock.read().unwrap();
     let feedbacks = feedback_lock.read().unwrap();
-    let entries = builder.build(&config);
+    // Transient fetch failure (opencode CLI flake): no fresh entries.
+    // Callers keep serving the previous payload instead of flashing empty.
+    let entries = builder.build(&config)?;
     let entry_count = entries.len();
     let bytes = serialize_payload(entries, &config, &feedbacks, entry_count);
-    (bytes, entry_count)
+    Some((bytes, entry_count))
 }
 
 fn broadcast(data: &PayloadBytes, clients: &ClientList) -> bool {
@@ -302,7 +307,11 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
     let config_file = Config::config_path();
     let config_lock = Arc::new(RwLock::new(config));
     let feedback_lock = Arc::new(RwLock::new(feedbacks));
-    let reports = crate::report::ReportMap::default();
+    let reports = report::load();
+    info!(
+        "reports loaded ({} panes)",
+        reports.lock().map(|m| m.len()).unwrap_or(0)
+    );
     spawn_listener(reports.clone());
     let builder = Arc::new(TreeBuilder::new(reports));
     let clients: ClientList = Arc::new(Mutex::new(Vec::new()));
@@ -317,6 +326,7 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
     // fast, and the refresh thread replaces entries on next build.
     if let Some(cache) = load_persisted_cache() {
         builder.load_disk_cache(&cache.git);
+        builder.load_seen(&cache.seen);
         info!(
             "disk cache loaded ({} diffs, {} branches, {} worktrees)",
             cache.git.diffs.len(),
@@ -378,11 +388,12 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                             if let Ok(mut f) = fb_lock.write() {
                                 *f = fb;
                             }
-                            let (bytes, _count) = build_payload(&lock, &fb_lock, &builder);
-                            if let Ok(mut d) = data.write() {
-                                *d = bytes;
+                            if let Some((bytes, _count)) = build_payload(&lock, &fb_lock, &builder) {
+                                if let Ok(mut d) = data.write() {
+                                    *d = bytes;
+                                }
+                                broadcast(&data, &clients);
                             }
-                            broadcast(&data, &clients);
                             wake.1.notify_all();
                         }
                         Err(e) => {
@@ -426,7 +437,12 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     *guard = false;
                 }
                 let start = Instant::now();
-                let (bytes, _count) = build_payload(&config_lock, &feedback_lock, &builder);
+                let Some((bytes, _count)) = build_payload(&config_lock, &feedback_lock, &builder)
+                else {
+                    // Transient fetch failure: keep the last good payload.
+                    info!("refresh skipped (fetch failed)");
+                    continue;
+                };
                 let changed = {
                     let mut d = data.write().unwrap();
                     if *d == bytes {
@@ -440,6 +456,7 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     broadcast(&data, &clients);
                     if last_cache_save.elapsed() > CACHE_SAVE_DEBOUNCE {
                         save_persisted_cache(&builder);
+                        report::save(&builder.reports());
                         if let Ok(d) = data.read() {
                             save_persisted_payload(&d);
                         }
@@ -498,8 +515,9 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                 // corrects itself a second later.
                 if clients.lock().map(|l| l.is_empty()).unwrap_or(false) {
                     let start = Instant::now();
-                    let (bytes, _count) = build_payload(&config_lock, &feedback_lock, &builder);
-                    if let Ok(mut d) = data.write() {
+                    if let Some((bytes, _count)) = build_payload(&config_lock, &feedback_lock, &builder)
+                        && let Ok(mut d) = data.write()
+                    {
                         *d = bytes;
                     }
                     info!("rebuilt for client in {}ms", start.elapsed().as_millis());
@@ -522,6 +540,7 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                 {
                     info!("idle timeout reached, shutting down daemon");
                     save_persisted_cache(&builder);
+                    report::save(&builder.reports());
                     if let Ok(d) = data.read() {
                         save_persisted_payload(&d);
                     }
@@ -640,6 +659,31 @@ fn insert_report(reports: &report::ReportMap, bytes: &[u8]) {
     };
     if !pane.is_empty() {
         report::insert(reports, pane, session);
+        maybe_save_reports(reports);
+    }
+}
+
+// The refresh thread only persists on changed builds, but with frequent
+// short-lived clients the accept path does most rebuilding — so reports
+// would never reach disk and the next respawn would flash synthetics
+// again. Persist here instead, debounced: the file is rewrite-tiny and
+// readers (daemon start) only need it to be seconds-fresh.
+const REPORT_SAVE_DEBOUNCE: Duration = Duration::from_secs(10);
+
+fn maybe_save_reports(reports: &report::ReportMap) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let due = LAST
+        .lock()
+        .map(|mut g| {
+            let due = g.map(|t| t.elapsed() > REPORT_SAVE_DEBOUNCE).unwrap_or(true);
+            if due {
+                *g = Some(Instant::now());
+            }
+            due
+        })
+        .unwrap_or(false);
+    if due {
+        report::save(reports);
     }
 }
 

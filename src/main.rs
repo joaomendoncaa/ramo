@@ -2,7 +2,8 @@ use ramo::cli::{Cli, Command, Daemon, Plugin};
 use ramo::config::Config;
 use ramo::picker::{self, Picker};
 use ramo::terminal::Tui;
-use ramo::{daemon, integration, model, purge, service, tmux};
+use ramo::integration::tmux;
+use ramo::{agents, daemon, integration, model, purge, service};
 use std::io;
 
 fn main() -> io::Result<()> {
@@ -23,6 +24,19 @@ fn main() -> io::Result<()> {
         }
         Command::Daemon(Daemon::Info) => {
             daemon::print_daemon_info();
+            return Ok(());
+        }
+        Command::Agents => {
+            agents::run_agents();
+            return Ok(());
+        }
+        Command::Focus {
+            session,
+            pane_id,
+            window,
+            pane,
+        } => {
+            agents::run_focus(&session, &pane_id, &window, &pane);
             return Ok(());
         }
         Command::Daemon(Daemon::Logs) => {
