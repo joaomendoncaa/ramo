@@ -58,7 +58,7 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         Command::Daemon(Daemon::Install) => {
-            return service::install();
+            return service::install(service::InstallMode::Interactive);
         }
         Command::Plugin(Plugin::Install) => {
             match integration::opencode::plugin_install() {

@@ -2,7 +2,7 @@ use crate::config::Config;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const UNIT_NAME: &str = "ramo-daemon.service";
 
@@ -23,7 +23,13 @@ pub fn under_systemd() -> bool {
 }
 
 fn systemctl(args: &[&str]) -> io::Result<bool> {
-    match Command::new("systemctl").arg("--user").args(args).status() {
+    match Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
         Ok(status) => Ok(status.success()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
@@ -34,7 +40,7 @@ pub fn stop() -> bool {
     systemctl(&["stop", UNIT_NAME]).unwrap_or(false)
 }
 
-pub fn install() -> io::Result<()> {
+fn write_service_file() -> io::Result<PathBuf> {
     let dir = unit_dir();
     fs::create_dir_all(&dir)?;
 
@@ -56,26 +62,67 @@ pub fn install() -> io::Result<()> {
     );
     let path = unit_path();
     fs::write(&path, unit)?;
-    println!("wrote {}", path.display());
+    Ok(path)
+}
 
+fn opt_out_path() -> PathBuf {
+    Config::config_base().join("ramo").join("no-autostart")
+}
+
+pub enum InstallMode {
+    Interactive,
+    Background,
+}
+
+pub fn install(mode: InstallMode) -> io::Result<()> {
+    let quiet = matches!(mode, InstallMode::Background);
+    if quiet && (is_installed() || opt_out_path().is_file()) {
+        return Ok(());
+    }
+    let path = write_service_file()?;
+    if !quiet {
+        let _ = fs::remove_file(opt_out_path());
+        println!("wrote {}", path.display());
+    }
+
+    // Quiet path is the cold-spawn autostart: enable only, the spawner
+    // already started this boot's daemon so --now would race it.
+    let enable: &[&str] = if quiet {
+        &["enable", UNIT_NAME]
+    } else {
+        &["enable", "--now", UNIT_NAME]
+    };
+    let tell = |err: bool, msg: String| {
+        if !quiet {
+            if err {
+                eprintln!("{msg}");
+            } else {
+                println!("{msg}");
+            }
+        }
+    };
     match systemctl(&["daemon-reload"]) {
-        Ok(true) => match systemctl(&["enable", "--now", UNIT_NAME]) {
-            Ok(true) => println!(
-                "enabled and started {} — the daemon will now start at login",
-                UNIT_NAME
+        Ok(true) => match systemctl(enable) {
+            Ok(true) => tell(
+                false,
+                format!("enabled and started {UNIT_NAME} — the daemon will now start at login"),
             ),
-            Ok(false) => eprintln!(
-                "warning: `systemctl --user enable --now {}` failed — run it manually",
-                UNIT_NAME
+            Ok(false) => tell(
+                true,
+                format!(
+                    "warning: `systemctl --user enable --now {UNIT_NAME}` failed — run it manually"
+                ),
             ),
-            Err(e) => eprintln!("warning: failed to run systemctl: {e}"),
+            Err(e) => tell(true, format!("warning: failed to run systemctl: {e}")),
         },
-        Ok(false) => {
-            eprintln!("warning: `systemctl --user daemon-reload` failed — run it manually")
-        }
-        Err(e) => {
-            eprintln!("warning: systemctl not available ({e}) — unit installed but not enabled")
-        }
+        Ok(false) => tell(
+            true,
+            "warning: `systemctl --user daemon-reload` failed — run it manually".into(),
+        ),
+        Err(e) => tell(
+            true,
+            format!("warning: systemctl not available ({e}) — unit installed but not enabled"),
+        ),
     }
     Ok(())
 }
@@ -83,7 +130,10 @@ pub fn install() -> io::Result<()> {
 pub fn uninstall() -> io::Result<()> {
     let _ = systemctl(&["stop", UNIT_NAME]);
     let _ = systemctl(&["disable", UNIT_NAME]);
-
+    // Stick: keep auto-install from re-enabling login start behind the
+    // user's back. `install` removes it; purge --with-config wipes the dir.
+    let _ = fs::create_dir_all(Config::config_base().join("ramo"));
+    let _ = fs::write(opt_out_path(), "run `ramo daemon install` to start at login\n");
     let path = unit_path();
     match fs::remove_file(&path) {
         Ok(()) => println!("removed {}", path.display()),

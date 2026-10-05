@@ -302,6 +302,23 @@ fn build_payload(
     Some((bytes, entry_count))
 }
 
+// Build once and store when changed. `None` is a transient fetch
+// failure — callers keep serving the previous payload.
+fn rebuild(
+    config_lock: &ConfigLock,
+    feedback_lock: &FeedbackLock,
+    builder: &TreeBuilder,
+    data: &PayloadBytes,
+) -> Option<bool> {
+    let (bytes, _count) = build_payload(config_lock, feedback_lock, builder)?;
+    let mut current = data.write().unwrap();
+    if *current == bytes {
+        return Some(false);
+    }
+    *current = bytes;
+    Some(true)
+}
+
 fn broadcast(data: &PayloadBytes, clients: &ClientList) -> bool {
     let bytes = data.read().unwrap().clone();
     let mut list = clients.lock().unwrap();
@@ -405,6 +422,19 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
     let listener = UnixListener::bind(&sock_path)?;
     listener.set_nonblocking(true)?;
 
+    // Index immediately so a login-started daemon is warm before the
+    // first picker opens — the refresh thread below would otherwise
+    // wait out the full idle interval before its first build.
+    if let Some(changed) = rebuild(&config_lock, &feedback_lock, &builder, &data) {
+        if changed {
+            save_persisted_cache(&builder);
+            if let Ok(d) = data.read() {
+                save_persisted_payload(&d);
+            }
+        }
+        info!("indexed at startup");
+    }
+
     // Wakes the refresh thread as soon as a first client connects, so it
     // rebuilds immediately instead of waiting for the next interval.
     let wake: Arc<(Mutex<bool>, Condvar)> = Arc::new((Mutex::new(false), Condvar::new()));
@@ -492,20 +522,11 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                     *guard = false;
                 }
                 let start = Instant::now();
-                let Some((bytes, _count)) = build_payload(&config_lock, &feedback_lock, &builder)
+                let Some(changed) = rebuild(&config_lock, &feedback_lock, &builder, &data)
                 else {
                     // Transient fetch failure: keep the last good payload.
                     info!("refresh skipped (fetch failed)");
                     continue;
-                };
-                let changed = {
-                    let mut d = data.write().unwrap();
-                    if *d == bytes {
-                        false
-                    } else {
-                        *d = bytes;
-                        true
-                    }
                 };
                 if changed {
                     broadcast(&data, &clients);
@@ -742,6 +763,7 @@ fn maybe_save_reports(reports: &report::ReportMap) {
 
 pub fn spawn(overrides: &[(String, Option<String>)]) -> Option<()> {
     let exe = std::env::current_exe().ok()?;
+    let _ = service::install(service::InstallMode::Background);
     let mut cmd = Command::new(exe);
     cmd.arg("daemon").arg("start");
     for (key, val) in overrides {
