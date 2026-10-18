@@ -48,6 +48,9 @@ pub struct Opencode {
     pub time_updated: i64,
     pub time_viewed: i64,
     pub is_running: bool,
+    /// Per-source deep link (clankers thread URL). `None` for sources
+    /// whose URL is derived later from a server base (opencode).
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +95,11 @@ pub struct Goto {
     // Stable tmux pane id (`%N`): indexes shift when panes open/close.
     #[serde(default)]
     pub pane_id: Option<String>,
+    // Browser jump for agents with no tmux pane (e.g. opencode web UI).
+    // When set, Enter opens this URL instead of switching tmux; all
+    // tmux-only actions (kill, open-detached, bar jump) ignore the row.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +139,22 @@ pub struct Payload {
     pub feedbacks: Vec<FeedbackEntry>,
     #[serde(default)]
     pub entries_found: usize,
+    /// Every API-active session, regardless of tmux openness. Reporting
+    /// (`ramo agents`, bars) reads this; the TUI keeps its own rules
+    /// (open dirs, archive) and ignores it. Additive: old payloads decode
+    /// as empty.
+    #[serde(default)]
+    pub running: Vec<RunningAgent>,
+}
+
+/// An agent running right now, for reporting. Unlike [`Entry`] this is
+/// not a TUI row: no pane binding, no open-dir gating, no archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningAgent {
+    pub id: String,
+    pub title: String,
+    pub directory: PathBuf,
+    pub url: Option<String>,
 }
 
 impl Entry {

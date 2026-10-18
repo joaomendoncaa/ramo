@@ -121,7 +121,9 @@ fn main() -> io::Result<()> {
 }
 
 fn perform_goto(goto: &model::Goto) {
-    if tmux::is_current_session(&goto.session) {
+    if let Some(url) = goto.url.as_deref().filter(|u| !u.is_empty()) {
+        open_url(url);
+    } else if tmux::is_current_session(&goto.session) {
         tmux::select_agent_pane(
             &tmux::resolve_session(&goto.session),
             goto.window,
@@ -131,4 +133,14 @@ fn perform_goto(goto: &model::Goto) {
     } else {
         tmux::goto(&goto);
     }
+}
+
+// ponytail: xdg-open only, `open` on macOS when someone needs it
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }

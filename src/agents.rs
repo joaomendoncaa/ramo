@@ -1,6 +1,6 @@
 use crate::daemon;
 use crate::integration::hyprland;
-use crate::model::{EntryType, Payload};
+use crate::model::{Entry, EntryType, Payload, RunningAgent};
 use crate::integration::tmux;
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
@@ -17,37 +17,7 @@ pub fn run_agents() {
         println!(r#"{{"ok": false, "error": "invalid daemon payload"}}"#);
         std::process::exit(1);
     };
-    let mut agents = Vec::new();
-    for entry in &payload.entries {
-        if entry.kind != EntryType::Agent {
-            continue;
-        }
-        let Some(goto) = &entry.goto else { continue };
-        let (Some(window), Some(pane)) = (goto.window, goto.pane) else { continue };
-        if goto.session.is_empty() {
-            continue;
-        }
-        let (repo, branch) = entry
-            .parent
-            .and_then(|i| payload.entries.get(i))
-            .map(|p| (p.label.clone(), p.branch.clone().unwrap_or_default()))
-            .unwrap_or_default();
-        agents.push(serde_json::json!({
-            "id": format!("{}:{window}:{pane}", goto.session),
-            "session": goto.session,
-            "window": window,
-            "pane": pane,
-            "paneId": goto.pane_id.clone().unwrap_or_default(),
-            "title": if entry.label.is_empty() { "New session".to_string() } else { entry.label.clone() },
-            "repo": repo,
-            "branch": branch,
-            "state": if entry.is_running { "running" } else { "idle" },
-            "additions": 0,
-            "deletions": 0,
-            "activityAt": 0,
-            "createdAt": 0,
-        }));
-    }
+    let mut agents = collect_agents(&payload.entries, &payload.running);
     agents.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let by_pane: HashMap<String, String> = agents
         .iter()
@@ -75,10 +45,131 @@ pub fn run_agents() {
     );
 }
 
+/// Merge TUI rows with the reporting truth: pane rows first (their jump
+/// target wins), then every API-active session missing from the rows.
+/// Pure for tests — `run_agents` only adds sorting and socket IO.
+fn collect_agents(entries: &[Entry], running: &[RunningAgent]) -> Vec<serde_json::Value> {
+    let mut agents = Vec::new();
+    let mut listed: HashSet<String> = HashSet::new();
+    for entry in entries {
+        if entry.kind != EntryType::Agent {
+            continue;
+        }
+        let Some(goto) = &entry.goto else { continue };
+        let (repo, branch) = entry
+            .parent
+            .and_then(|i| entries.get(i))
+            .map(|p| (p.label.clone(), p.branch.clone().unwrap_or_default()))
+            .unwrap_or_default();
+        // Browser row (web UI agent): no tmux target — widgets jump via
+        // `url` directly (`ramo focus` stays tmux-only).
+        if let Some(url) = goto.url.as_deref().filter(|u| !u.is_empty()) {
+            let id = entry.session_id.clone().unwrap_or_else(|| entry.label.clone());
+            listed.insert(id.clone());
+            agents.push(serde_json::json!({
+                "id": id,
+                "session": "",
+                "window": 0,
+                "pane": 0,
+                "paneId": "",
+                "title": if entry.label.is_empty() { "New session".to_string() } else { entry.label.clone() },
+                "repo": repo,
+                "branch": branch,
+                "state": if entry.is_running { "running" } else { "idle" },
+                "url": url,
+                "additions": 0,
+                "deletions": 0,
+                "activityAt": 0,
+                "createdAt": 0,
+            }));
+            continue;
+        }
+        let (Some(window), Some(pane)) = (goto.window, goto.pane) else { continue };
+        if goto.session.is_empty() {
+            continue;
+        }
+        if let Some(id) = entry.session_id.clone() {
+            listed.insert(id);
+        }
+        agents.push(serde_json::json!({
+            "id": format!("{}:{window}:{pane}", goto.session),
+            "session": goto.session,
+            "window": window,
+            "pane": pane,
+            "paneId": goto.pane_id.clone().unwrap_or_default(),
+            "title": if entry.label.is_empty() { "New session".to_string() } else { entry.label.clone() },
+            "repo": repo,
+            "branch": branch,
+            "state": if entry.is_running { "running" } else { "idle" },
+            "url": "",
+            "additions": 0,
+            "deletions": 0,
+            "activityAt": 0,
+            "createdAt": 0,
+        }));
+    }
+    // Reporting truth: every API-active session, even where the TUI
+    // shows nothing (closed dir, archived, never seen). Pane rows above
+    // win the shared id so the jump target stays the tmux pane.
+    for r in running {
+        if listed.contains(&r.id) {
+            continue;
+        }
+        listed.insert(r.id.clone());
+        let (repo, branch) = place_of(entries, &r.directory);
+        agents.push(serde_json::json!({
+            "id": r.id,
+            "session": "",
+            "window": 0,
+            "pane": 0,
+            "paneId": "",
+            "title": if r.title.is_empty() { "New session".to_string() } else { r.title.clone() },
+            "repo": repo,
+            "branch": branch,
+            "state": "running",
+            "url": r.url.clone().unwrap_or_default(),
+            "additions": 0,
+            "deletions": 0,
+            "activityAt": 0,
+            "createdAt": 0,
+        }));
+    }
+    agents
+}
+
+/// Owning project for a session directory: the deepest row covering it
+/// (closed dirs are in the payload too, just without agent children).
+/// Falls back to the bare directory name when untracked by ramo.
+fn place_of(entries: &[Entry], dir: &std::path::Path) -> (String, String) {
+    let mut best: Option<&Entry> = None;
+    for e in entries {
+        if e.kind == EntryType::Agent {
+            continue;
+        }
+        if e.path == dir || dir.starts_with(&e.path) {
+            let deeper = best.is_none_or(|b| e.path.components().count() > b.path.components().count());
+            if deeper {
+                best = Some(e);
+            }
+        }
+    }
+    match best {
+        Some(e) => (
+            e.label.clone(),
+            e.branch.clone().unwrap_or_default(),
+        ),
+        None => (
+            dir.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            String::new(),
+        ),
+    }
+}
+
 fn focused_client_session() -> Option<String> {
     let win = hyprland::active_window_pid()?;
-    let out = tmux::tmux_lines(&["list-clients", "-F", "#{client_pid} #{client_session}"]);
-    for line in &out {
+    let out = tmux::tmux_lines(&["list-clients", "-F", "#{client_pid} #{client_session}"]);    for line in &out {
         let mut parts = line.splitn(2, ' ');
         if let (Some(pid), Some(session)) = (parts.next(), parts.next())
             && let Ok(pid) = pid.parse::<u32>()
@@ -177,4 +268,72 @@ pub fn run_focus(session: &str, pane_id: &str, window: &str, pane: &str) {
         p.map(|v| v.to_string()).unwrap_or_default(),
     );
     println!(r#"{{"activeAgentId": "{session}:{w}:{p}"}}"#);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::EntryType;
+
+    fn dir(label: &str, path: &str, branch: Option<&str>) -> Entry {
+        let mut e = Entry {
+            kind: EntryType::Dir,
+            label: label.into(),
+            path: path.into(),
+            changes: None,
+            branch: branch.map(str::to_string),
+            is_open: false,
+            is_running: false,
+            pending: false,
+            depth: 0,
+            ancestors: vec![],
+            is_last: true,
+            search_text: label.into(),
+            goto: None,
+            parent: None,
+            connector: String::new(),
+            search_text_lower: label.to_lowercase(),
+            session_id: None,
+        };
+        e.compute_connector();
+        e
+    }
+
+    #[test]
+    fn place_of_prefers_deepest_covering_row() {
+        let entries = vec![
+            dir("lab", "/home/joao/lab", None),
+            dir("ramo", "/home/joao/lab/ramo", Some("feat/tui")),
+        ];
+        let (repo, branch) = place_of(&entries, std::path::Path::new("/home/joao/lab/ramo"));
+        assert_eq!((repo.as_str(), branch.as_str()), ("ramo", "feat/tui"));
+    }
+
+    #[test]
+    fn running_covers_closed_dirs_and_pane_rows_win() {
+        // TUI shows nothing for this session (closed dir, no row) but
+        // reporting still lists it, placed under its project.
+        let mut blog = dir("blog", "/home/joao/lab/blog", Some("main"));
+        blog.is_open = false;
+        let running = vec![RunningAgent {
+            id: "ses-web".into(),
+            title: "Web work".into(),
+            directory: "/home/joao/lab/blog".into(),
+            url: Some("http://x/server/local/session/ses-web".into()),
+        }];
+        let agents = collect_agents(&[blog], &running);
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["id"].as_str(), Some("ses-web"));
+        assert_eq!(agents[0]["repo"].as_str(), Some("blog"));
+        assert_eq!(agents[0]["state"].as_str(), Some("running"));
+        assert!(agents[0]["url"].as_str().is_some_and(|u| !u.is_empty()));
+
+        // Empty running changes nothing (and never dupes pane rows).
+        assert!(collect_agents(&[], &[]).is_empty());
+    }
+    #[test]
+    fn place_of_falls_back_to_basename() {
+        let (repo, branch) = place_of(&[], std::path::Path::new("/nowhere/proj"));
+        assert_eq!((repo.as_str(), branch.as_str()), ("proj", ""));
+    }
 }

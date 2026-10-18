@@ -157,6 +157,7 @@ impl Picker {
 
     /// Drop dormant rows for archived sessions. Live panes always stay —
     /// hiding an open pane would ghost it, and the daemon does the same.
+    /// Browser rows hide too: their goto is a URL, not a tmux target.
     fn filter_archived(&mut self) {
         if self.archived.is_empty() {
             return;
@@ -164,7 +165,7 @@ impl Picker {
         let archived = self.archived.clone();
         self.retain_entries(|e| {
             e.kind != EntryType::Agent
-                || e.goto.is_some()
+                || e.goto.as_ref().is_some_and(|g| g.url.is_none())
                 || e.session_id.as_deref().is_none_or(|id| !archived.contains(id))
         });
     }
@@ -340,10 +341,12 @@ impl Picker {
             return vec![];
         }
         let mut buttons = Vec::new();
-        if entry.goto.is_some() && (entry.is_open || entry.kind == EntryType::Agent) {
+        // Browser rows jump via URL: no tmux session to kill or detach.
+        let tmux_goto = entry.goto.as_ref().is_some_and(|g| g.url.is_none());
+        if tmux_goto && (entry.is_open || entry.kind == EntryType::Agent) {
             let key = self.config.bind_command_session_kill.to_uppercase();
             buttons.push((format!("{key} Kill Session"), Action::KillSession));
-        } else if entry.goto.is_some() {
+        } else if tmux_goto {
             let key = self.config.bind_command_open_detached.to_uppercase();
             buttons.push((format!("{key} Open Detached"), Action::OpenDetached));
         }
@@ -366,6 +369,9 @@ impl Picker {
         let Some(goto) = entry.goto.clone() else {
             return;
         };
+        if goto.url.is_some() {
+            return;
+        }
         if !(entry.is_open || entry.kind == EntryType::Agent) {
             self.feedbacks.push(FeedbackEntry {
                 level: FeedbackType::Warning,
@@ -396,6 +402,9 @@ impl Picker {
         let Some(goto) = entry.goto.clone() else {
             return;
         };
+        if goto.url.is_some() {
+            return;
+        }
         if entry.is_open || entry.kind == EntryType::Agent || entry.pending {
             self.feedbacks.push(FeedbackEntry {
                 level: FeedbackType::Warning,
@@ -442,8 +451,12 @@ impl Picker {
         save_archived_to(path, &map);
         // Drop dormant rows now; live panes stay until closed (same rule
         // as filter_archived, so stale daemon payloads converge too).
+        // Browser rows drop like dormant: URL goto, no tmux target.
         let pos = self.cursor;
-        self.retain_entries(|e| e.goto.is_some() || e.session_id.as_deref() != Some(id.as_str()));
+        self.retain_entries(|e| {
+            e.goto.as_ref().is_some_and(|g| g.url.is_none())
+                || e.session_id.as_deref() != Some(id.as_str())
+        });
         self.filtered = self.filtered();
         self.cursor = pos.min(self.filtered.len().saturating_sub(1));
         self.schedule_refresh();
@@ -555,6 +568,7 @@ impl Picker {
                 window: None,
                 pane: None,
                 pane_id: None,
+                url: None,
             }),
             parent: Some(dir_idx),
             connector: String::new(),
@@ -716,6 +730,7 @@ impl Picker {
             if e.parent == Some(idx)
                 && e.kind == EntryType::Agent
                 && let Some(g) = &e.goto
+                && g.url.is_none()
             {
                 tmux::kill_agent(
                     &tmux::resolve_session(&g.session),
@@ -989,6 +1004,7 @@ mod archive_tests {
                 window: None,
                 pane: None,
                 pane_id: None,
+                url: None,
             }),
             parent: None,
             connector: String::new(),
@@ -1017,6 +1033,7 @@ mod archive_tests {
                 window: Some(1),
                 pane: Some(1),
                 pane_id: Some("%99".into()),
+                url: None,
             }),
             parent: Some(dir_idx),
             connector: String::new(),
@@ -1040,6 +1057,7 @@ mod archive_tests {
             config: config.clone(),
             feedbacks: vec![],
             entries_found: 4,
+            running: vec![],
         });
         let tmp = std::env::temp_dir().join(format!("ramo-archive-test-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&tmp);

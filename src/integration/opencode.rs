@@ -4,18 +4,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PLUGIN_DIRNAME: &str = "ramo";
+
+/// Exact `agents-disabled` token for this source.
+pub const SOURCE_ID: &str = "opencode";
 const PLUGIN_ASSETS: &[(&str, &str)] = &[
     ("package.json", include_str!("assets/opencode/package.json")),
     ("server.js", include_str!("assets/opencode/server.js")),
     ("tui.js", include_str!("assets/opencode/tui.js")),
 ];
 
-pub fn sessions(ignored_agents: &[String]) -> Option<Vec<Opencode>> {
-    let list = api("session.list", &["--param", "limit=500"])?
-        .get("data")?
-        .as_array()?
-        .clone();
-
+pub fn sessions(ignored_agents: &[String], want: &HashSet<String>) -> Option<Vec<Opencode>> {
     let active: HashSet<String> = api("session.active", &[])
         .and_then(|v| {
             v.get("data")?
@@ -24,11 +22,47 @@ pub fn sessions(ignored_agents: &[String]) -> Option<Vec<Opencode>> {
         })
         .unwrap_or_default();
 
-    Some(
-        list.iter()
-            .filter_map(|item| parse_session(item, &active, ignored_agents))
-            .collect(),
-    )
+    // `session.list` truncates large responses mid-JSON on pipes (the CLI
+    // exits before a 500-row dump flushes), so page small and stop once
+    // every tracked id resolved — typically a single page.
+    // ponytail: 5x100 cap keeps today's 500-row coverage; deleted tracked
+    // ids just cost the full 5 calls until pruned from `seen`
+    const PAGE: usize = 100;
+    const MAX_PAGES: usize = 5;
+    let mut out = Vec::new();
+    let mut ids = HashSet::new();
+    let mut pending: HashSet<&str> = want.iter().map(String::as_str).collect();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let limit = format!("limit={PAGE}");
+        let mut params = vec!["--param", limit.as_str()];
+        let cur;
+        if let Some(c) = cursor.as_ref() {
+            cur = format!("cursor={c}");
+            params.extend(["--param", cur.as_str()]);
+        }
+        let page = api("session.list", &params)?;
+        let list = page.get("data")?.as_array()?.clone();
+        let n = list.len();
+        for item in &list {
+            if let Some(s) = parse_session(item, &active, ignored_agents)
+                && ids.insert(s.id.clone())
+            {
+                pending.remove(s.id.as_str());
+                out.push(s);
+            }
+        }
+        cursor = page
+            .pointer("/cursor/next")
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
+        if n < PAGE || pending.is_empty() || cursor.is_none() {
+            break;
+        }
+    }
+
+    Some(out)
 }
 
 pub fn plugin_install() -> Result<(), String> {
@@ -36,6 +70,29 @@ pub fn plugin_install() -> Result<(), String> {
     let pkg = dir.join(PLUGIN_DIRNAME);
     plugin_write_assets(&pkg)?;
     plugin_register(&dir, &pkg)
+}
+
+/// Base URL of the local opencode server (`opencode2 service status`
+/// prints it; the port is dynamic). Fresh per build — no cache to go
+/// stale when the service restarts.
+pub fn server_url() -> Option<String> {
+    let out = Command::new("opencode2")
+        .args(["service", "status"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    s.starts_with("http").then_some(s)
+}
+
+/// Deep link to a session in the web UI. Route is
+/// `/server/:serverKey/session/:id`; localhost maps to key `local`
+/// (verify by clicking — worst case the app lands on its server picker).
+// ponytail: no percent-encoding, session ids are [A-Za-z0-9_-]
+pub fn session_url(base: &str, id: &str) -> String {
+    format!("{}/server/local/session/{id}", base.trim_end_matches('/'))
 }
 
 fn api(method: &str, params: &[&str]) -> Option<serde_json::Value> {
@@ -92,6 +149,8 @@ fn parse_session(
         time_updated: at("updated"),
         time_viewed: at("viewed"),
         is_running: active.contains(id),
+        // URL is derived later from the server base (`session_url`).
+        url: None,
     })
 }
 

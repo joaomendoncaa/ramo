@@ -87,7 +87,23 @@ fn sess(id: &str, title: &str, dir: &Path, running: bool) -> Opencode {
         time_updated: 1_700_000_100,
         time_viewed: 0,
         is_running: running,
+        url: None,
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Session touched a minute ago, agent quiet since: the sub-second-turn
+/// case `session.active` never holds.
+fn sess_recent(id: &str, title: &str, dir: &Path) -> Opencode {
+    let mut s = sess(id, title, dir, false);
+    s.time_updated = now_ms() - 60_000;
+    s
 }
 
 fn builder_with_reports(pairs: &[(&str, &str)]) -> TreeBuilder {
@@ -125,6 +141,7 @@ fn live_panes_bind_exact_reported_sessions() {
         ],
         &[sess("ses-a", "Alpha work", &fx.alpha, true), sess("ses-b", "Beta work", &fx.beta, false)],
         None,
+        None,
     );
     let live = live_agents_of(&entries);
     assert_eq!(live.len(), 2, "both panes listed: {entries:?}");
@@ -157,6 +174,7 @@ fn missing_report_is_synthetic_never_another_title() {
         ],
         &[sess("ses-a", "Alpha work", &fx.alpha, false)],
         None,
+        None,
     );
     let live = live_agents_of(&entries);
     assert_eq!(live.len(), 2);
@@ -179,6 +197,7 @@ fn unknown_reported_id_is_synthetic() {
         &[tmux_session("alpha", &fx.alpha)],
         &[pane("alpha", 1, 0, "%11", &fx.alpha)],
         &[sess("ses-a", "Alpha work", &fx.alpha, false)],
+        None,
         None,
     );
     let live = live_agents_of(&entries);
@@ -205,6 +224,7 @@ fn index_shift_keeps_identity_order_and_keys() {
         ],
         &api,
         None,
+        None,
     );
     // Panes open/close around them: window/pane indexes shift, pane ids
     // (stable for the pane lifetime) do not.
@@ -216,6 +236,7 @@ fn index_shift_keeps_identity_order_and_keys() {
             pane("alpha", 3, 5, "%22", &fx.alpha),
         ],
         &api,
+        None,
         None,
     );
     let keys = |es: &[ramo::model::Entry]| {
@@ -241,8 +262,8 @@ fn rebuild_is_byte_stable() {
     let sessions = vec![tmux_session("alpha", &fx.alpha)];
     let panes = vec![pane("alpha", 1, 0, "%11", &fx.alpha)];
     let api = vec![sess("ses-a", "Alpha work", &fx.alpha, true)];
-    let a = b.build_with(&fx.config, &sessions, &panes, &api, None);
-    let c = b.build_with(&fx.config, &sessions, &panes, &api, None);
+    let a = b.build_with(&fx.config, &sessions, &panes, &api, None, None);
+    let c = b.build_with(&fx.config, &sessions, &panes, &api, None, None);
     assert_eq!(
         serde_json::to_vec(&a).unwrap(),
         serde_json::to_vec(&c).unwrap(),
@@ -264,7 +285,7 @@ fn recency_change_does_not_reorder() {
         sess("ses-a", "Alpha work", &fx.alpha, false),
         sess("ses-b", "Beta work", &fx.alpha, false),
     ];
-    let _ = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
+    let _ = b.build_with(&fx.config, &sessions, &live_panes, &api, None, None);
     let order = |es: &[ramo::model::Entry]| {
         agents_of(es)
             .iter()
@@ -273,11 +294,11 @@ fn recency_change_does_not_reorder() {
     };
     api[0].time_updated = 1_800_000_000;
     api[1].time_updated = 1_900_000_001;
-    let first = b.build_with(&fx.config, &sessions, &[], &api, None);
+    let first = b.build_with(&fx.config, &sessions, &[], &api, None, None);
     assert_eq!(order(&first), vec!["ses-a".to_string(), "ses-b".to_string()]);
     // ses-a gets a new message — recency would flip it on top.
     api[0].time_updated = 1_999_999_999;
-    let second = b.build_with(&fx.config, &sessions, &[], &api, None);
+    let second = b.build_with(&fx.config, &sessions, &[], &api, None, None);
     assert_eq!(
         order(&second),
         order(&first),
@@ -295,10 +316,10 @@ fn closed_pane_becomes_dormant_once_seen() {
         sess("ses-a", "Alpha work", &fx.alpha, false),
         sess("ses-never", "Never opened", &fx.alpha, false),
     ];
-    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
+    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None, None);
     assert!(live_agents_of(&live).iter().any(|e| e.label == "Alpha work"));
     // Pane closed (or `/new` moved on): no panes at all now.
-    let after = b.build_with(&fx.config, &sessions, &[], &api, None);
+    let after = b.build_with(&fx.config, &sessions, &[], &api, None, None);
     let agents = agents_of(&after);
     assert_eq!(agents.len(), 1, "seen session lingers once, history stays out");
     assert_eq!(agents[0].label, "Alpha work");
@@ -313,10 +334,10 @@ fn closed_dir_hides_dormant_agents() {
     let sessions = vec![tmux_session("alpha", &fx.alpha)];
     let live_panes = vec![pane("alpha", 1, 0, "%11", &fx.alpha)];
     let api = vec![sess("ses-a", "Alpha work", &fx.alpha, false)];
-    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
+    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None, None);
     assert!(live_agents_of(&live).iter().any(|e| e.label == "Alpha work"));
     // Dir itself closed (no tmux session, no panes): dormant stays out.
-    let after = b.build_with(&fx.config, &[], &[], &api, None);
+    let after = b.build_with(&fx.config, &[], &[], &api, None, None);
     assert!(
         agents_of(&after).is_empty(),
         "closed dir shows no agents: {after:?}"
@@ -330,11 +351,11 @@ fn archived_ids_stay_out_of_dormant() {
     let sessions = vec![tmux_session("alpha", &fx.alpha)];
     let live_panes = vec![pane("alpha", 1, 0, "%11", &fx.alpha)];
     let api = vec![sess("ses-a", "Alpha work", &fx.alpha, false)];
-    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None);
+    let live = b.build_with(&fx.config, &sessions, &live_panes, &api, None, None);
     assert!(live_agents_of(&live).iter().any(|e| e.label == "Alpha work"));
     // Pane closed: dormant would list it — but the user hid it.
     b.archive("ses-a");
-    let after = b.build_with(&fx.config, &sessions, &[], &api, None);
+    let after = b.build_with(&fx.config, &sessions, &[], &api, None, None);
     assert!(
         agents_of(&after).is_empty(),
         "archived session stays hidden: {after:?}"
@@ -352,6 +373,7 @@ fn live_panes_ignore_archive() {
         &[tmux_session("alpha", &fx.alpha)],
         &[pane("alpha", 1, 0, "%11", &fx.alpha)],
         &[sess("ses-a", "Alpha work", &fx.alpha, true)],
+        None,
         None,
     );
     assert_eq!(live_agents_of(&entries).len(), 1);
@@ -402,6 +424,7 @@ fn picker_archive_hides_dormant_row_and_persists() {
         config: config.clone(),
         feedbacks: vec![],
         entries_found: 1,
+        running: vec![],
     });
     assert!(picker.archive_selected_to(&path));
     let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -418,6 +441,63 @@ fn picker_archive_hides_dormant_row_and_persists() {
     assert!(!text.contains("archived"), "archiving is silent");
     let back = ramo::builder::load_archived_from(&path);
     assert_eq!(back.get("ses-a").map(String::as_str), Some("Alpha work"));
+}
+
+#[test]
+fn picker_archive_hides_browser_row() {
+    // URL rows hide like dormant (no tmux target), unlike live panes.
+    use ramo::model::{Entry, Goto, Payload};
+    use ramo::picker::Picker;
+
+    let dir = tmp_root();
+    let path = dir.join("archived.json");
+    let mut agent = Entry {
+        kind: EntryType::Agent,
+        label: "Web work".into(),
+        path: "/tmp/ramo-archive-test/alpha".into(),
+        changes: None,
+        branch: None,
+        is_open: false,
+        is_running: true,
+        pending: false,
+        depth: 1,
+        ancestors: vec![],
+        is_last: true,
+        search_text: "alpha Web work".into(),
+        goto: Some(Goto {
+            session: String::new(),
+            path: "/tmp/ramo-archive-test/alpha".into(),
+            window: None,
+            pane: None,
+            pane_id: None,
+            url: Some("http://127.0.0.1:4096/server/local/session/ses-w".into()),
+        }),
+        parent: None,
+        connector: String::new(),
+        search_text_lower: "alpha web work".into(),
+        session_id: Some("ses-w".into()),
+    };
+    agent.compute_connector();
+    let config = Config::default();
+    let mut picker = Picker::new(Payload {
+        entries: vec![agent],
+        config: config.clone(),
+        feedbacks: vec![],
+        entries_found: 1,
+        running: vec![],
+    });
+    assert!(picker.archive_selected_to(&path));
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| picker.render(f, &config)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let (w, h) = (buf.area.width, buf.area.height);
+    let mut text = String::new();
+    for y in 0..h {
+        for x in 0..w {
+            text.push_str(buf[(x, y)].symbol());
+        }
+    }
+    assert!(!text.contains("Web work"), "browser row removed optimistically");
 }
 
 #[test]
@@ -446,6 +526,7 @@ fn picker_archive_keeps_live_row() {
             window: Some(1),
             pane: Some(0),
             pane_id: Some("%11".into()),
+            url: None,
         }),
         parent: None,
         connector: String::new(),
@@ -459,6 +540,7 @@ fn picker_archive_keeps_live_row() {
         config: config.clone(),
         feedbacks: vec![],
         entries_found: 1,
+        running: vec![],
     });
     assert!(picker.archive_selected_to(&path));
     // Recorded for when the pane closes, but the open pane stays visible.
@@ -492,13 +574,13 @@ fn daemon_respawn_keeps_live_bindings() {
     let api = vec![sess("ses-a", "Alpha work", &fx.alpha, true)];
 
     let a = builder_with_reports(&[("%11", "ses-a")]);
-    let before = a.build_with(&fx.config, &sessions, &panes, &api, None);
+    let before = a.build_with(&fx.config, &sessions, &panes, &api, None, None);
     assert_eq!(live_agents_of(&before).len(), 1);
 
     let path = fx._root.join("reports.json");
     report::save_to(&path, &a.reports());
     let b = TreeBuilder::new(report::load_from(&path));
-    let after = b.build_with(&fx.config, &sessions, &panes, &api, None);
+    let after = b.build_with(&fx.config, &sessions, &panes, &api, None, None);
 
     assert_eq!(
         serde_json::to_vec(&before).unwrap(),
@@ -517,10 +599,197 @@ fn unseen_sessions_are_archived_by_default() {
         &[],
         &[sess("ses-old", "Ancient history", &fx.alpha, false)],
         None,
+        None,
     );
     assert!(
         agents_of(&entries).is_empty(),
         "unseen history is archived until ramo sees it live"
+    );
+}
+
+#[test]
+fn web_active_unseen_lists_with_browser_goto() {
+    // API-active but no tmux pane (web UI agent): not dormant — a running
+    // row whose goto opens the browser. No `seen` needed.
+    let fx = fixture();
+    let b = builder_with_reports(&[]);
+    let entries = b.build_with(
+        &fx.config,
+        &[tmux_session("alpha", &fx.alpha)],
+        &[],
+        &[sess("ses-web", "Web work", &fx.alpha, true)],
+        None,
+        Some("http://127.0.0.1:4096"),
+    );
+    let agents = agents_of(&entries);
+    assert_eq!(agents.len(), 1, "web agent lists: {entries:?}");
+    let row = agents[0];
+    assert!(row.is_running, "running, not dormant-idle");
+    let goto = row.goto.as_ref().expect("browser goto");
+    assert_eq!(
+        goto.url.as_deref(),
+        Some("http://127.0.0.1:4096/server/local/session/ses-web")
+    );
+    assert_eq!(row.session_id.as_deref(), Some("ses-web"));
+    assert_eq!(
+        row.stable_key(),
+        (ramo::model::EntryType::Agent, "session:ses-web".to_string())
+    );
+}
+
+#[test]
+fn web_active_unseen_lists_dormant_without_server() {
+    // No server, no browser target — but activity still counts as seen,
+    // so the running session lists as a plain dormant row.
+    let fx = fixture();
+    let b = builder_with_reports(&[]);
+    let entries = b.build_with(
+        &fx.config,
+        &[tmux_session("alpha", &fx.alpha)],
+        &[],
+        &[sess("ses-web", "Web work", &fx.alpha, true)],
+        None,
+        None,
+    );
+    let agents = agents_of(&entries);
+    assert_eq!(agents.len(), 1, "active session lists: {entries:?}");
+    assert_eq!(agents[0].goto, None);
+}
+
+#[test]
+fn web_active_enters_seen_and_survives_idle() {
+    // `active` only holds sessions mid-generation: tracking must not
+    // pulse with every turn. Once seen active, the row survives idle
+    // stretches (and server outages) as a dormant row.
+    let fx = fixture();
+    let b = builder_with_reports(&[]);
+    let sessions = vec![tmux_session("alpha", &fx.alpha)];
+    let first = b.build_with(
+        &fx.config,
+        &sessions,
+        &[],
+        &[sess("ses-web", "Web work", &fx.alpha, true)],
+        None,
+        Some("http://127.0.0.1:4096"),
+    );
+    assert_eq!(agents_of(&first).len(), 1);
+    assert!(agents_of(&first)[0].goto.is_some());
+    // Turn over: idle, server gone — the row stays, goto drops.
+    let second = b.build_with(
+        &fx.config,
+        &sessions,
+        &[],
+        &[sess("ses-web", "Web work", &fx.alpha, false)],
+        None,
+        None,
+    );
+    let agents = agents_of(&second);
+    assert_eq!(agents.len(), 1, "tracked session persists: {second:?}");
+    assert_eq!(agents[0].session_id.as_deref(), Some("ses-web"));
+    assert_eq!(agents[0].goto, None);
+}
+
+#[test]
+fn idle_seen_gets_browser_goto() {    // A tmux session's pane closed and the agent went quiet: still
+    // tracked, still openable — in the browser now.
+    let fx = fixture();
+    let b = builder_with_reports(&[("%11", "ses-a")]);
+    let sessions = vec![tmux_session("alpha", &fx.alpha)];
+    let live = b.build_with(
+        &fx.config,
+        &sessions,
+        &[pane("alpha", 1, 0, "%11", &fx.alpha)],
+        &[sess("ses-a", "Alpha work", &fx.alpha, true)],
+        None,
+        None,
+    );
+    assert_eq!(live_agents_of(&live).len(), 1);
+    let after = b.build_with(
+        &fx.config,
+        &sessions,
+        &[],
+        &[sess("ses-a", "Alpha work", &fx.alpha, false)],
+        None,
+        Some("http://127.0.0.1:4096"),
+    );
+    let agents = agents_of(&after);
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        agents[0].goto.as_ref().and_then(|g| g.url.as_deref()),
+        Some("http://127.0.0.1:4096/server/local/session/ses-a")
+    );
+    assert!(!agents[0].is_running);
+}
+
+#[test]
+fn running_list_covers_active_regardless_of_tmux() {
+    // Reporting truth: every API-active session, open dir or not, seen
+    // or not. Inactive sessions stay out.
+    let fx = fixture();
+    let oc = vec![
+        sess("ses-web", "Web work", &fx.alpha, true),
+        sess("ses-old", "Ancient history", &fx.beta, false),
+    ];
+    let running = ramo::builder::running_list(&oc, Some("http://127.0.0.1:4096"));
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].id, "ses-web");
+    assert_eq!(
+        running[0].url.as_deref(),
+        Some("http://127.0.0.1:4096/server/local/session/ses-web")
+    );
+    let no_server = ramo::builder::running_list(&oc, None);
+    assert_eq!(no_server.len(), 1, "listed even with no URL to jump to");
+    assert_eq!(no_server[0].url, None);
+}
+
+#[test]
+fn running_list_includes_recently_touched_idle() {
+    // "hi" → instant reply: never in `session.active`, but updated a
+    // minute ago. Reporting still lists it; hour-old history stays out.
+    let fx = fixture();
+    let mut touched = sess_recent("ses-hi", "Quick question", &fx.alpha);
+    let mut old = sess("ses-old", "Ancient history", &fx.alpha, false);
+    old.time_updated = now_ms() - 3_600_000;
+    let running = ramo::builder::running_list(&[touched, old], Some("http://127.0.0.1:4096"));
+    assert_eq!(running.len(), 1, "only the recent touch lists");
+    assert_eq!(running[0].id, "ses-hi");
+}
+
+#[test]
+fn recent_touch_enters_seen_for_picker_too() {
+    // Same recency rule feeds tracking: the TUI shows the touched
+    // session under its open dir with a browser goto.
+    let fx = fixture();
+    let b = builder_with_reports(&[]);
+    let entries = b.build_with(
+        &fx.config,
+        &[tmux_session("alpha", &fx.alpha)],
+        &[],
+        &[sess_recent("ses-hi", "Quick question", &fx.alpha)],
+        None,
+        Some("http://127.0.0.1:4096"),
+    );
+    let agents = agents_of(&entries);
+    assert_eq!(agents.len(), 1, "recent touch lists: {entries:?}");
+    assert!(!agents[0].is_running);
+    assert!(agents[0].goto.as_ref().is_some_and(|g| g.url.is_some()));
+}
+
+#[test]
+fn inactive_unseen_stays_out_with_server() {
+    let fx = fixture();
+    let b = builder_with_reports(&[]);
+    let entries = b.build_with(
+        &fx.config,
+        &[tmux_session("alpha", &fx.alpha)],
+        &[],
+        &[sess("ses-old", "Ancient history", &fx.alpha, false)],
+        None,
+        Some("http://127.0.0.1:4096"),
+    );
+    assert!(
+        agents_of(&entries).is_empty(),
+        "idle history stays out even with a server: {entries:?}"
     );
 }
 
@@ -539,6 +808,7 @@ fn shared_session_collapses_to_home_viewer() {
             pane("beta", 2, 1, "%57", &fx.beta),
         ],
         &[sess("ses-x", "Shared", &fx.beta, false)],
+        None,
         None,
     );
     let live = live_agents_of(&entries);
@@ -567,8 +837,8 @@ fn shared_session_no_home_is_deterministic() {
         pane("alpha", 2, 1, "%57", &fx.alpha),
     ];
     let api = vec![sess("ses-x", "Shared", &fx.beta, false)];
-    let first = b.build_with(&fx.config, &sessions, &panes, &api, None);
-    let second = b.build_with(&fx.config, &sessions, &panes, &api, None);
+    let first = b.build_with(&fx.config, &sessions, &panes, &api, None, None);
+    let second = b.build_with(&fx.config, &sessions, &panes, &api, None, None);
     for entries in [&first, &second] {
         assert_eq!(live_agents_of(entries).len(), 1);
     }
@@ -603,6 +873,7 @@ fn shared_session_prefers_current_viewer() {
         ],
         &[sess("ses-x", "Shared", &fx.beta, false)],
         Some("alpha"),
+        None,
     );
     let live = live_agents_of(&entries);
     assert_eq!(live.len(), 1);
@@ -627,7 +898,7 @@ fn shared_session_closed_winner_falls_to_other() {
         pane("beta", 2, 1, "%57", &fx.beta),
     ];
     let api = vec![sess("ses-x", "Shared", &fx.beta, false)];
-    let before = b.build_with(&fx.config, &sessions, &both, &api, Some("alpha"));
+    let before = b.build_with(&fx.config, &sessions, &both, &api, Some("alpha"), None);
     assert_eq!(
         live_agents_of(&before)[0]
             .goto
@@ -644,6 +915,7 @@ fn shared_session_closed_winner_falls_to_other() {
         &[pane("beta", 2, 1, "%57", &fx.beta)],
         &api,
         Some("alpha"),
+        None,
     );
     let live = live_agents_of(&after);
     assert_eq!(live.len(), 1);
@@ -669,6 +941,7 @@ fn non_opencode_panes_are_not_agents() {
         &[tmux_session("alpha", &fx.alpha)],
         &[shell],
         &[sess("ses-a", "Alpha work", &fx.alpha, false)],
+        None,
         None,
     );
     assert!(

@@ -154,6 +154,7 @@ config! {
     style_icon_input            : String = "▸".to_string(),
     style_entries_gap           : u64    = 0,
     opencode_agents_ignored     : CSV    = Vec::new(),
+    agents_disabled             : CSV    = Vec::new(),
 }
 
 impl Config {

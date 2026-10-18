@@ -126,6 +126,7 @@ pub fn goto(action: &Goto) {
         window,
         pane,
         pane_id,
+        ..
     } = action;
 
     let target = resolve_session(session);

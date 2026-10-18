@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::git::GitCache;
-use crate::integration::opencode;
+use crate::integration::{clankers, opencode, source_disabled};
 use crate::model::{
-    Changes, Entry, EntryType, Goto, Opencode, TmuxPane, TmuxSession, WorktreeInfo,
+    Changes, Entry, EntryType, Goto, Opencode, RunningAgent, TmuxPane, TmuxSession, WorktreeInfo,
 };
 use crate::report;
 use crate::integration::tmux;
@@ -10,13 +10,16 @@ use crate::util;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct TreeBuilder {
     git_cache: GitCache,
     reports: report::ReportMap,
-    // Session ids ever shown live since tracking began. Only these can
-    // go dormant — the API's full history stays out of the list until
-    // ramo actually sees a session open. Survives restarts via cache.json.
+    // Session ids ever shown live since tracking began, plus ids caught
+    // API-active (web UI agents have no pane to bind, and `active` only
+    // holds them mid-generation). Only these go unbound — the API's full
+    // history stays out of the list until ramo actually sees a session
+    // open. Survives restarts via cache.json.
     seen: Mutex<HashSet<String>>,
     // Session ids the user hid (`ramo archive` / ctrl-a). Dormant rows
     // for these stay out; live panes always show. Loaded from disk so
@@ -62,26 +65,63 @@ impl TreeBuilder {
         self.git_cache.to_disk()
     }
 
-    pub fn build(&self, config: &Config) -> Option<Vec<Entry>> {
-        let (tmux_snapshot, oc_sessions, current) = std::thread::scope(|s| {
+    pub fn build(&self, config: &Config) -> Option<(Vec<Entry>, Vec<RunningAgent>)> {
+        // `want` lets the paged fetch stop early once every tracked id
+        // resolved — snapshot before spawning so all pages agree.
+        let want: HashSet<String> = self.seen.lock().unwrap().iter().cloned().collect();
+        let ignored = config.opencode_agents_ignored.clone();
+        let disabled = config.agents_disabled.clone();
+        let oc_off = source_disabled(&disabled, opencode::SOURCE_ID);
+        let ck_off = source_disabled(&disabled, clankers::SOURCE_ID);
+        let (tmux_snapshot, oc_sessions, ck_sessions, current, base_url) = std::thread::scope(|s| {
             let tmux_h = s.spawn(tmux::snapshot);
             let oc_h = s.spawn(|| {
-                opencode::sessions(&config.opencode_agents_ignored)
+                if oc_off {
+                    Some(Vec::new())
+                } else {
+                    opencode::sessions(&ignored, &want)
+                }
+            });
+            let ck_h = s.spawn(|| {
+                if ck_off {
+                    Vec::new()
+                } else {
+                    clankers::sessions()
+                }
             });
             let cur_h = s.spawn(tmux::current_session_name);
-            (tmux_h.join().unwrap(), oc_h.join().unwrap(), cur_h.join().unwrap())
+            let url_h = s.spawn(|| {
+                if oc_off {
+                    None
+                } else {
+                    opencode::server_url()
+                }
+            });
+            (
+                tmux_h.join().unwrap(),
+                oc_h.join().unwrap(),
+                ck_h.join().unwrap(),
+                cur_h.join().unwrap(),
+                url_h.join().unwrap(),
+            )
         });
         // A transient `opencode api` failure must not wipe the list for a
         // frame (every pane would flash synthetic, then snap back). The
         // daemon keeps serving the previous payload instead.
-        let oc_sessions = oc_sessions?;
-        Some(self.build_with(
+        let mut oc_sessions = oc_sessions?;
+        // One list regardless of source: every consumer below (pane
+        // binding, dormant rows, `running_list`) reconciles through it.
+        oc_sessions.extend(ck_sessions);
+        let running = running_list(&oc_sessions, base_url.as_deref());
+        let entries = self.build_with(
             config,
             &tmux_snapshot.sessions,
             &tmux_snapshot.panes,
             &oc_sessions,
             current.as_deref(),
-        ))
+            base_url.as_deref(),
+        );
+        Some((entries, running))
     }
 
     /// Pure assembly from already-fetched inputs. Headless tests drive
@@ -90,6 +130,8 @@ impl TreeBuilder {
     /// `current_session` is the tmux session the picker was opened from
     /// (used only to pick the jump target when several panes show one
     /// agent session); tests pass `None` unless pinning that rule.
+    /// `server_url` is the web UI base (`None` in tests and when the
+    /// server is unreachable: unbound rows get no goto, Enter is a no-op).
     pub fn build_with(
         &self,
         config: &Config,
@@ -97,6 +139,7 @@ impl TreeBuilder {
         panes: &[TmuxPane],
         oc_sessions: &[Opencode],
         current_session: Option<&str>,
+        server_url: Option<&str>,
     ) -> Vec<Entry> {
 
         let oc_panes = tmux::opencode_panes(panes);
@@ -108,24 +151,44 @@ impl TreeBuilder {
         let (pane_sessions, bound) =
             match_panes_to_sessions(&oc_panes, oc_sessions, &self.reports, current_session);
         // Sessions no live pane binds (exited to shell, pane closed,
-        // `/new` moved the pane on) stay listed as dormant rows under
-        // their directory — but only sessions ramo has actually seen
+        // `/new` moved the pane on, web UI agents) stay listed as rows
+        // under their directory — but only sessions ramo has actually seen
         // open. Everything older than tracking stays out until opened.
-        self.seen.lock().unwrap().extend(bound.iter().cloned());
+        // `active` counts as seen: `session.active` only holds sessions
+        // mid-generation, so gating on it would pulse rows with every
+        // turn. Seen persists; the row (and its browser goto) survives
+        // idle stretches. Recent touches count too, for the same
+        // sub-second-turn reason (see `touched_recently`).
+        self.seen.lock().unwrap().extend(
+            bound.iter().cloned().chain(
+                oc_sessions
+                    .iter()
+                    .filter(|s| s.is_running || touched_recently(s))
+                    .map(|s| s.id.clone()),
+            ),
+        );
         let seen = self.seen.lock().unwrap();
         let archived = self.archived.lock().unwrap();
-        let mut dormant: Vec<Opencode> = oc_sessions
+        let mut dormant: Vec<(Opencode, Option<String>)> = oc_sessions
             .iter()
             .filter(|s| {
                 !bound.contains(&s.id) && seen.contains(&s.id) && !archived.contains(&s.id)
             })
-            .cloned()
+            .map(|s| {
+                // Per-source link wins (clankers carries its own); opencode
+                // rows derive one from the server base.
+                let url = s
+                    .url
+                    .clone()
+                    .or_else(|| server_url.map(|base| opencode::session_url(base, &s.id)));
+                (s.clone(), url)
+            })
             .collect();
         drop(seen);
         drop(archived);
         // Stable by id: sorting by recency reordered rows under the
         // cursor whenever any session updated mid-picker.
-        dormant.sort_by(|a, b| a.id.cmp(&b.id));
+        dormant.sort_by(|a, b| a.0.id.cmp(&b.0.id));
 
         let dirs = self.parse_directories(&config.path);
         let open: HashSet<PathBuf> = dirs
@@ -216,8 +279,9 @@ impl TreeBuilder {
         let mut dir_entries: Vec<DirEntry> = Vec::with_capacity(dirs.len());
         for ((d, git), branch) in dirs.iter().zip(git_data.iter()).zip(branches) {
             // Closed dirs show no dormant agents: rows with no goto that
-            // nobody can jump to are stale-feeling noise.
-            let visible: &[Opencode] =
+            // nobody can jump to are stale-feeling noise. (Web rows do
+            // carry a goto — the browser URL — so they stay useful.)
+            let visible: &[(Opencode, Option<String>)] =
                 if open.contains(&d.path) { &dormant } else { &[] };
             dir_entries.push(build_dir_entry(
                 d,
@@ -436,7 +500,7 @@ fn build_dir_entry(
     sessions: &[TmuxSession],
     panes: &[TmuxPane],
     pane_sessions: &[PaneSession],
-    dormant: &[Opencode],
+    dormant: &[(Opencode, Option<String>)],
 ) -> DirEntry {
     let mut worktrees: Vec<WtEntry> = git
         .worktrees
@@ -459,7 +523,7 @@ fn build_dir_entry(
                 sessions: wt_sessions,
                 dormant: dormant
                     .iter()
-                    .filter(|s| is_in(&s.directory, &wt.path))
+                    .filter(|(s, _)| is_in(&s.directory, &wt.path))
                     .cloned()
                     .collect(),
                 info: wt.clone(),
@@ -480,7 +544,7 @@ fn build_dir_entry(
         sessions: dir_sessions(dir, &git.worktrees, pane_sessions),
         dormant: dormant
             .iter()
-            .filter(|s| {
+            .filter(|(s, _)| {
                 is_in(&s.directory, &dir.path)
                     && !git
                         .worktrees
@@ -568,6 +632,7 @@ fn push_agent_row(
             window: Some(ps.pane.window_index),
             pane: Some(ps.pane.pane_index),
             pane_id: Some(ps.pane.pane_id.clone()),
+            url: None,
         }),
         parent,
         connector: String::new(),
@@ -579,13 +644,25 @@ fn push_agent_row(
 fn push_dormant_row(
     rows: &mut Vec<Entry>,
     session: &Opencode,
+    url: Option<&str>,
     depth: usize,
     ancestors: Vec<bool>,
     is_last: bool,
     search_text: String,
     parent: Option<usize>,
 ) {
-    // Present but not open in any pane: no goto, Enter is a no-op.
+    // No tmux pane — but an API-active session (e.g. web UI) still jumps,
+    // via the browser. Truly idle sessions keep no goto: Enter is a no-op.
+    let goto = url
+        .filter(|u| !u.is_empty())
+        .map(|u| Goto {
+            session: String::new(),
+            path: session.directory.clone(),
+            window: None,
+            pane: None,
+            pane_id: None,
+            url: Some(u.to_string()),
+        });
     rows.push(finalize_entry(Entry {
         kind: EntryType::Agent,
         label: session.title.clone(),
@@ -593,13 +670,13 @@ fn push_dormant_row(
         changes: None,
         branch: None,
         is_open: false,
-        is_running: false,
+        is_running: session.is_running,
         pending: false,
         depth,
         ancestors,
         is_last,
         search_text,
-        goto: None,
+        goto,
         parent,
         connector: String::new(),
         search_text_lower: String::new(),
@@ -637,6 +714,7 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             window: None,
             pane: None,
             pane_id: None,
+            url: None,
         }),
         parent: None,
         connector: String::new(),
@@ -661,12 +739,13 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
             Some(dir_idx),
         );
     }
-    for s in &entry.dormant {
+    for (s, url) in &entry.dormant {
         let is_last = child == total_children - 1;
         child += 1;
         push_dormant_row(
             rows,
             s,
+            url.as_deref(),
             1,
             vec![],
             is_last,
@@ -707,6 +786,7 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
                 window: None,
                 pane: None,
                 pane_id: None,
+                url: None,
             }),
             parent: Some(dir_idx),
             connector: String::new(),
@@ -726,10 +806,11 @@ fn push_entry(entry: &DirEntry, is_last_dir: bool, rows: &mut Vec<Entry>) {
                 Some(wt_idx),
             );
         }
-        for (di, s) in w.dormant.iter().enumerate() {
+        for (di, (s, url)) in w.dormant.iter().enumerate() {
             push_dormant_row(
                 rows,
                 s,
+                url.as_deref(),
                 2,
                 vec![is_last_dir],
                 di == d_total - 1,
@@ -803,6 +884,7 @@ fn push_wt_root(root: &WtRoot, is_last_root: bool, rows: &mut Vec<Entry>) {
             window: None,
             pane: None,
             pane_id: None,
+            url: None,
         }),
         parent: None,
         connector: String::new(),
@@ -822,10 +904,11 @@ fn push_wt_root(root: &WtRoot, is_last_root: bool, rows: &mut Vec<Entry>) {
             Some(wt_idx),
         );
     }
-    for (di, s) in root.wt.dormant.iter().enumerate() {
+    for (di, (s, url)) in root.wt.dormant.iter().enumerate() {
         push_dormant_row(
             rows,
             s,
+            url.as_deref(),
             1,
             vec![],
             di == d_total - 1,
@@ -848,7 +931,7 @@ struct DirEntry {
     branch: Option<String>,
     worktrees: Vec<WtEntry>,
     sessions: Vec<PaneSession>,
-    dormant: Vec<Opencode>,
+    dormant: Vec<(Opencode, Option<String>)>,
 }
 
 struct WtEntry {
@@ -857,7 +940,7 @@ struct WtEntry {
     branch: Option<String>,
     is_open: bool,
     sessions: Vec<PaneSession>,
-    dormant: Vec<Opencode>,
+    dormant: Vec<(Opencode, Option<String>)>,
 }
 
 #[derive(Clone)]
@@ -875,6 +958,7 @@ fn synthetic(p: &TmuxPane) -> Opencode {
         time_updated: p.activity,
         time_viewed: 0,
         is_running: false,
+        url: None,
     }
 }
 
@@ -969,6 +1053,41 @@ fn collapse_shared(sessions: Vec<PaneSession>, current: Option<&str>) -> Vec<Pan
 
 fn is_in(path: &Path, base: &Path) -> bool {
     path == base || path.starts_with(base)
+}
+
+/// Every API-active session as reporting data. No tmux gating, no
+/// archive — the single source of truth for "what is running", consumed
+/// by `ramo agents`/bars. Pure for tests.
+pub fn running_list(oc_sessions: &[Opencode], server_url: Option<&str>) -> Vec<RunningAgent> {
+    let mut out: Vec<RunningAgent> = oc_sessions
+        .iter()
+        .filter(|s| s.is_running || touched_recently(s))
+        .map(|s| RunningAgent {
+            id: s.id.clone(),
+            title: s.title.clone(),
+            directory: s.directory.clone(),
+            url: s
+                .url
+                .clone()
+                .or_else(|| server_url.map(|base| opencode::session_url(base, &s.id))),
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+// `session.active` only holds sessions mid-generation, so a two-second
+// turn ("hi" → instant reply) would otherwise never register anywhere.
+// A touch in the last minutes counts as live-ish; tabs open-but-idle
+// longer are indistinguishable from history — correctly hidden.
+// ponytail: fixed 10min window, no config for a value nobody tunes
+const RECENT_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+fn touched_recently(s: &Opencode) -> bool {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .is_ok_and(|now| now.saturating_sub(s.time_updated) < RECENT_WINDOW_MS)
 }
 
 fn keep_mask(dirs: &[DirInfo], git_data: &[DirGit]) -> Vec<bool> {

@@ -1,7 +1,7 @@
 use crate::builder::TreeBuilder;
 use crate::config::Config;
 use crate::logs;
-use crate::model::{Entry, FeedbackEntry, FeedbackType, Payload};
+use crate::model::{Entry, FeedbackEntry, FeedbackType, Payload, RunningAgent};
 use crate::report;
 use crate::service;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ pub fn preflight(config: &Config, feedbacks: Vec<FeedbackEntry>) -> Payload {
         config: config.clone(),
         feedbacks,
         entries_found: 0,
+        running: Vec::new(),
     }
 }
 
@@ -274,6 +275,7 @@ type PayloadBytes = Arc<RwLock<Vec<u8>>>;
 
 fn serialize_payload(
     entries: Vec<Entry>,
+    running: Vec<RunningAgent>,
     config: &Config,
     feedbacks: &[FeedbackEntry],
     entries_found: usize,
@@ -283,6 +285,7 @@ fn serialize_payload(
         config: config.clone(),
         feedbacks: feedbacks.to_vec(),
         entries_found,
+        running,
     })
     .unwrap_or_default()
 }
@@ -296,9 +299,9 @@ fn build_payload(
     let feedbacks = feedback_lock.read().unwrap();
     // Transient fetch failure (opencode CLI flake): no fresh entries.
     // Callers keep serving the previous payload instead of flashing empty.
-    let entries = builder.build(&config)?;
+    let (entries, running) = builder.build(&config)?;
     let entry_count = entries.len();
-    let bytes = serialize_payload(entries, &config, &feedbacks, entry_count);
+    let bytes = serialize_payload(entries, running, &config, &feedbacks, entry_count);
     Some((bytes, entry_count))
 }
 
@@ -414,7 +417,7 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
             feedback_lock.read().unwrap().clone(),
         );
         let initial = load_persisted_payload(&config, &feedbacks).unwrap_or_else(|| {
-            serialize_payload(Vec::new(), &config, &feedbacks, 0)
+            serialize_payload(Vec::new(), Vec::new(), &config, &feedbacks, 0)
         });
         Arc::new(RwLock::new(initial))
     };
@@ -587,7 +590,11 @@ pub fn start(overrides: Vec<(String, Option<String>)>) -> std::io::Result<()> {
                 last_connection = std::time::Instant::now();
                 // First client after idle: rebuild synchronously so the
                 // picker opens on fresh entries, never a stale flash that
-                // corrects itself a second later.
+                // corrects itself a second later. Prune first: one-shot
+                // readers (`ramo agents` polls) disconnect after one frame
+                // but linger in the list, which would otherwise pin "has
+                // clients" forever and freeze the payload at 30s staleness.
+                prune_dead(&clients);
                 if clients.lock().map(|l| l.is_empty()).unwrap_or(false) {
                     let start = Instant::now();
                     if let Some((bytes, _count)) = build_payload(&config_lock, &feedback_lock, &builder)
@@ -831,6 +838,7 @@ pub fn initial_fetch(overrides: &[(String, Option<String>)]) -> Payload {
         config,
         feedbacks,
         entries_found: 0,
+        running: Vec::new(),
     }
 }
 

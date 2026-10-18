@@ -104,6 +104,7 @@ fn nav_up_moves_selection_up_at_every_resolution() {
             config: config.clone(),
             feedbacks: vec![],
             entries_found: 3,
+            running: vec![],
         });
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
 
