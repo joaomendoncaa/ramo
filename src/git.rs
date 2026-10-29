@@ -8,7 +8,6 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 const CACHE_TTL_MS: u128 = 10_000;
-// ponytail: 5s poll, not inotify — keeps picker create/delete snappy at this repo count
 const WORKTREE_CACHE_TTL_MS: u128 = 5_000;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -46,9 +45,6 @@ impl GitCache {
     }
 
     fn compute_changes(&self, path: &Path) -> Changes {
-        if !path.join(".git").exists() {
-            return Changes::default();
-        }
         let mut additions = 0i64;
         let mut deletions = 0i64;
         if let Some(out) = self.git_stdout(path, &["diff", "--numstat", "HEAD"]) {
@@ -70,9 +66,6 @@ impl GitCache {
     }
 
     fn list_worktrees(&self, path: &Path) -> Vec<WorktreeInfo> {
-        if !path.join(".git").exists() {
-            return vec![];
-        }
         let Some(out) = self.git_stdout(path, &["worktree", "list"]) else {
             return vec![];
         };
@@ -93,15 +86,22 @@ impl GitCache {
     }
 
     fn compute_branch(&self, path: &Path) -> Option<String> {
-        if !path.join(".git").exists() {
-            return None;
-        }
         let out = self.git_stdout(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         let b = out.trim();
-        if b.is_empty() || b == "HEAD" { None } else { Some(b.to_string()) }
+        if b.is_empty() || b == "HEAD" {
+            None
+        } else {
+            Some(b.to_string())
+        }
     }
 
-    fn cached<T: Clone>(&self, lock: &Mutex<HashMap<PathBuf, (T, Instant)>>, path: &Path, ttl: u128, f: impl FnOnce() -> T) -> T {
+    fn cached<T: Clone>(
+        &self,
+        lock: &Mutex<HashMap<PathBuf, (T, Instant)>>,
+        path: &Path,
+        ttl: u128,
+        f: impl FnOnce() -> T,
+    ) -> T {
         if let Ok(c) = lock.lock()
             && let Some((v, t)) = c.get(path)
             && t.elapsed().as_millis() < ttl
@@ -116,17 +116,34 @@ impl GitCache {
     }
 
     pub fn diff(&self, path: &Path) -> Changes {
-        self.cached(&self.diffs, path, CACHE_TTL_MS, || self.compute_changes(path))
+        if !is_repo(path) {
+            evict(&self.diffs, path);
+            return Changes::default();
+        }
+        self.cached(&self.diffs, path, CACHE_TTL_MS, || {
+            self.compute_changes(path)
+        })
     }
     pub fn worktrees(&self, path: &Path) -> Vec<WorktreeInfo> {
-        // ponytail: exists-filter, not prune — `rm -rf` leaves `prunable` rows in `git worktree list`
-        self.cached(&self.worktrees, path, WORKTREE_CACHE_TTL_MS, || self.list_worktrees(path))
-            .into_iter()
-            .filter(|wt| wt.is_main || wt.path.is_dir())
-            .collect()
+        if !is_repo(path) {
+            evict(&self.worktrees, path);
+            return vec![];
+        }
+        self.cached(&self.worktrees, path, WORKTREE_CACHE_TTL_MS, || {
+            self.list_worktrees(path)
+        })
+        .into_iter()
+        .filter(|wt| wt.is_main || wt.path.is_dir())
+        .collect()
     }
     pub fn branch(&self, path: &Path) -> Option<String> {
-        self.cached(&self.branches, path, CACHE_TTL_MS, || self.compute_branch(path))
+        if !is_repo(path) {
+            evict(&self.branches, path);
+            return None;
+        }
+        self.cached(&self.branches, path, CACHE_TTL_MS, || {
+            self.compute_branch(path)
+        })
     }
 
     pub fn load_disk(&self, cache: &DiskCache) {
@@ -151,14 +168,32 @@ impl GitCache {
     }
     pub fn to_disk(&self) -> DiskCache {
         DiskCache {
-            diffs: self.diffs.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default(),
-            worktrees: self.worktrees.lock().map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect()).unwrap_or_default(),
+            diffs: self
+                .diffs
+                .lock()
+                .map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect())
+                .unwrap_or_default(),
+            worktrees: self
+                .worktrees
+                .lock()
+                .map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect())
+                .unwrap_or_default(),
             branches: self
                 .branches
                 .lock()
                 .map(|c| c.iter().map(|(k, (v, _))| (k.clone(), v.clone())).collect())
                 .unwrap_or_default(),
         }
+    }
+}
+
+fn is_repo(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
+fn evict<T>(lock: &Mutex<HashMap<PathBuf, (T, Instant)>>, path: &Path) {
+    if let Ok(mut c) = lock.lock() {
+        c.remove(path);
     }
 }
 
@@ -195,25 +230,29 @@ pub fn worktree_add(repo: &Path, dest: &Path, branch: &str) -> Result<(), String
     match git_run(repo, &["worktree", "add", &arg, "-b", branch]) {
         Ok(_) => Ok(()),
         // branch may already exist — fall back to checking it out
-        Err(_) => git_run(repo, &["worktree", "add", &arg, branch]).map(|_| ()).map_err(|e| {
-            if e.is_empty() {
-                format!("cannot checkout '{branch}' at {}", dest.display())
-            } else {
-                e
-            }
-        }),
+        Err(_) => git_run(repo, &["worktree", "add", &arg, branch])
+            .map(|_| ())
+            .map_err(|e| {
+                if e.is_empty() {
+                    format!("cannot checkout '{branch}' at {}", dest.display())
+                } else {
+                    e
+                }
+            }),
     }
 }
 
 pub fn worktree_remove(repo: &Path, wt: &Path) -> Result<(), String> {
     let arg = wt.to_string_lossy().into_owned();
-    git_run(repo, &["worktree", "remove", "--force", &arg]).map(|_| ()).map_err(|e| {
-        if e.is_empty() {
-            format!("cannot remove {}", wt.display())
-        } else {
-            e
-        }
-    })
+    git_run(repo, &["worktree", "remove", "--force", &arg])
+        .map(|_| ())
+        .map_err(|e| {
+            if e.is_empty() {
+                format!("cannot remove {}", wt.display())
+            } else {
+                e
+            }
+        })
 }
 
 pub fn sanitize_branch_name(raw: &str) -> String {
@@ -276,3 +315,37 @@ pub fn unique_dest(dest: PathBuf) -> PathBuf {
     dest
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drops_cached_git_data_when_repo_disappears() {
+        let dir = std::env::temp_dir().join(format!("ramo-git-cache-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let cache = GitCache::new();
+        cache.diffs.lock().unwrap().insert(
+            dir.clone(),
+            (
+                Changes {
+                    additions: 5,
+                    deletions: 1,
+                },
+                Instant::now(),
+            ),
+        );
+        cache
+            .branches
+            .lock()
+            .unwrap()
+            .insert(dir.clone(), (Some("main".into()), Instant::now()));
+        assert_eq!(cache.diff(&dir).additions, 5);
+        assert_eq!(cache.branch(&dir).as_deref(), Some("main"));
+
+        std::fs::remove_dir_all(dir.join(".git")).unwrap();
+        assert!(cache.diff(&dir).has_none());
+        assert_eq!(cache.branch(&dir), None);
+        assert!(!cache.diffs.lock().unwrap().contains_key(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
